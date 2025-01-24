@@ -72,24 +72,28 @@ bool OperatorProperties::NeedsExactContext(const Operator* op) {
     case IrOpcode::kJSCreateCatchContext:
     case IrOpcode::kJSCreateWithContext:
     case IrOpcode::kJSDebugger:
+    case IrOpcode::kJSDefineKeyedOwnProperty:
     case IrOpcode::kJSDeleteProperty:
     case IrOpcode::kJSGeneratorStore:
     case IrOpcode::kJSGetImportMeta:
     case IrOpcode::kJSHasProperty:
     case IrOpcode::kJSHasContextExtension:
     case IrOpcode::kJSLoadContext:
+    case IrOpcode::kJSLoadScriptContext:
     case IrOpcode::kJSLoadModule:
     case IrOpcode::kJSLoadNamed:
     case IrOpcode::kJSLoadNamedFromSuper:
     case IrOpcode::kJSLoadProperty:
     case IrOpcode::kJSStoreContext:
-    case IrOpcode::kJSStoreDataPropertyInLiteral:
+    case IrOpcode::kJSStoreScriptContext:
+    case IrOpcode::kJSDefineKeyedOwnPropertyInLiteral:
     case IrOpcode::kJSStoreGlobal:
     case IrOpcode::kJSStoreInArrayLiteral:
     case IrOpcode::kJSStoreModule:
-    case IrOpcode::kJSStoreNamed:
-    case IrOpcode::kJSStoreNamedOwn:
-    case IrOpcode::kJSStoreProperty:
+    case IrOpcode::kJSSetNamedProperty:
+    case IrOpcode::kJSDefineNamedOwnProperty:
+    case IrOpcode::kJSSetKeyedProperty:
+    case IrOpcode::kJSFindNonDefaultConstructorOrConstruct:
       return true;
 
     case IrOpcode::kJSAsyncFunctionEnter:
@@ -103,6 +107,7 @@ bool OperatorProperties::NeedsExactContext(const Operator* op) {
     case IrOpcode::kJSCreateStringIterator:
     case IrOpcode::kJSCreateKeyValueArray:
     case IrOpcode::kJSCreateObject:
+    case IrOpcode::kJSCreateStringWrapper:
     case IrOpcode::kJSCreatePromise:
     case IrOpcode::kJSCreateTypedArray:
     case IrOpcode::kJSCreateArray:
@@ -120,11 +125,12 @@ bool OperatorProperties::NeedsExactContext(const Operator* op) {
       break;
 
 #define CASE(Name) case IrOpcode::k##Name:
-      // Non-JavaScript operators don't have a notion of "context"
+      // Non-JavaScript operators don't have a notion of "context".
       COMMON_OP_LIST(CASE)
       CONTROL_OP_LIST(CASE)
       MACHINE_OP_LIST(CASE)
-      MACHINE_SIMD_OP_LIST(CASE)
+      MACHINE_SIMD128_OP_LIST(CASE)
+      IF_WASM(MACHINE_SIMD256_OP_LIST, CASE)
       SIMPLIFIED_OP_LIST(CASE)
       break;
 #undef CASE
@@ -198,18 +204,21 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSLoadNamed:
     case IrOpcode::kJSLoadNamedFromSuper:
     case IrOpcode::kJSLoadProperty:
-    case IrOpcode::kJSStoreDataPropertyInLiteral:
+    case IrOpcode::kJSDefineKeyedOwnPropertyInLiteral:
     case IrOpcode::kJSStoreInArrayLiteral:
     case IrOpcode::kJSStoreGlobal:
-    case IrOpcode::kJSStoreNamed:
-    case IrOpcode::kJSStoreNamedOwn:
-    case IrOpcode::kJSStoreProperty:
+    case IrOpcode::kJSSetNamedProperty:
+    case IrOpcode::kJSDefineNamedOwnProperty:
+    case IrOpcode::kJSSetKeyedProperty:
+    case IrOpcode::kJSDefineKeyedOwnProperty:
 
     // Conversions
     case IrOpcode::kJSToLength:
     case IrOpcode::kJSToName:
     case IrOpcode::kJSToNumber:
     case IrOpcode::kJSToNumberConvertBigInt:
+    case IrOpcode::kJSToBigInt:
+    case IrOpcode::kJSToBigIntConvertNumber:
     case IrOpcode::kJSToNumeric:
     case IrOpcode::kJSToObject:
     case IrOpcode::kJSToString:
@@ -220,11 +229,14 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSConstruct:
     case IrOpcode::kJSConstructWithArrayLike:
     case IrOpcode::kJSConstructWithSpread:
+    case IrOpcode::kJSConstructForwardAllArgs:
     case IrOpcode::kJSCallForwardVarargs:
     case IrOpcode::kJSCall:
     case IrOpcode::kJSCallWithArrayLike:
     case IrOpcode::kJSCallWithSpread:
+#if V8_ENABLE_WEBASSEMBLY
     case IrOpcode::kJSWasmCall:
+#endif  // V8_ENABLE_WEBASSEMBLY
 
     // Misc operations
     case IrOpcode::kJSAsyncFunctionEnter:
@@ -235,6 +247,7 @@ bool OperatorProperties::HasFrameStateInput(const Operator* op) {
     case IrOpcode::kJSStackCheck:
     case IrOpcode::kJSDebugger:
     case IrOpcode::kJSGetSuperConstructor:
+    case IrOpcode::kJSFindNonDefaultConstructorOrConstruct:
     case IrOpcode::kJSBitwiseNot:
     case IrOpcode::kJSDecrement:
     case IrOpcode::kJSIncrement:

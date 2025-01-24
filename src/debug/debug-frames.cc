@@ -5,7 +5,12 @@
 #include "src/debug/debug-frames.h"
 
 #include "src/builtins/accessors.h"
+#include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/debug/debug-wasm-objects.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -21,18 +26,21 @@ FrameInspector::FrameInspector(CommonFrame* frame, int inlined_frame_index,
 
   is_constructor_ = summary.is_constructor();
   source_position_ = summary.SourcePosition();
-  function_name_ = summary.FunctionName();
-  script_ = Handle<Script>::cast(summary.script());
+  script_ = Cast<Script>(summary.script());
   receiver_ = summary.receiver();
 
   if (summary.IsJavaScript()) {
     function_ = summary.AsJavaScript().function();
   }
 
+#if V8_ENABLE_WEBASSEMBLY
   JavaScriptFrame* js_frame =
-      frame->is_java_script() ? javascript_frame() : nullptr;
+      frame->is_javascript() ? javascript_frame() : nullptr;
   DCHECK(js_frame || frame->is_wasm());
-  is_optimized_ = frame_->is_optimized();
+#else
+  JavaScriptFrame* js_frame = javascript_frame();
+#endif  // V8_ENABLE_WEBASSEMBLY
+  is_optimized_ = js_frame && js_frame->is_optimized();
 
   // Calculate the deoptimized frame.
   if (is_optimized_) {
@@ -66,42 +74,66 @@ Handle<Object> FrameInspector::GetContext() {
                             : handle(frame_->context(), isolate_);
 }
 
-bool FrameInspector::IsWasm() { return frame_->is_wasm(); }
-
-bool FrameInspector::IsJavaScript() { return frame_->is_java_script(); }
-
-bool FrameInspector::ParameterIsShadowedByContextLocal(
-    Handle<ScopeInfo> info, Handle<String> parameter_name) {
-  VariableMode mode;
-  InitializationFlag init_flag;
-  MaybeAssignedFlag maybe_assigned_flag;
-  IsStaticFlag is_static_flag;
-  return ScopeInfo::ContextSlotIndex(*info, *parameter_name, &mode, &init_flag,
-                                     &maybe_assigned_flag,
-                                     &is_static_flag) != -1;
+DirectHandle<String> FrameInspector::GetFunctionName() {
+#if V8_ENABLE_WEBASSEMBLY
+  if (IsWasm()) {
+#if V8_ENABLE_DRUMBRAKE
+    if (IsWasmInterpreter()) {
+      auto wasm_frame = WasmInterpreterEntryFrame::cast(frame_);
+      auto instance_data =
+          handle(wasm_frame->trusted_instance_data(), isolate_);
+      return GetWasmFunctionDebugName(
+          isolate_, instance_data,
+          wasm_frame->function_index(inlined_frame_index_));
+    }
+#endif  // V8_ENABLE_DRUMBRAKE
+    auto wasm_frame = WasmFrame::cast(frame_);
+    auto instance_data = handle(wasm_frame->trusted_instance_data(), isolate_);
+    return GetWasmFunctionDebugName(isolate_, instance_data,
+                                    wasm_frame->function_index());
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+  return JSFunction::GetDebugName(function_);
 }
 
-RedirectActiveFunctions::RedirectActiveFunctions(SharedFunctionInfo shared,
-                                                 Mode mode)
+#if V8_ENABLE_WEBASSEMBLY
+bool FrameInspector::IsWasm() { return frame_->is_wasm(); }
+#if V8_ENABLE_DRUMBRAKE
+bool FrameInspector::IsWasmInterpreter() {
+  return frame_->is_wasm_interpreter_entry();
+}
+#endif  // V8_ENABLE_DRUMBRAKE
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+bool FrameInspector::IsJavaScript() { return frame_->is_javascript(); }
+
+bool FrameInspector::ParameterIsShadowedByContextLocal(
+    DirectHandle<ScopeInfo> info, DirectHandle<String> parameter_name) {
+  return info->ContextSlotIndex(parameter_name) != -1;
+}
+
+RedirectActiveFunctions::RedirectActiveFunctions(
+    Isolate* isolate, Tagged<SharedFunctionInfo> shared, Mode mode)
     : shared_(shared), mode_(mode) {
-  DCHECK(shared.HasBytecodeArray());
-  if (mode == Mode::kUseDebugBytecode) {
-    DCHECK(shared.HasDebugInfo());
-  }
+  DCHECK(shared->HasBytecodeArray());
+  DCHECK_IMPLIES(mode == Mode::kUseDebugBytecode,
+                 shared->HasDebugInfo(isolate));
 }
 
 void RedirectActiveFunctions::VisitThread(Isolate* isolate,
                                           ThreadLocalTop* top) {
-  for (JavaScriptFrameIterator it(isolate, top); !it.done(); it.Advance()) {
+  for (JavaScriptStackFrameIterator it(isolate, top); !it.done();
+       it.Advance()) {
     JavaScriptFrame* frame = it.frame();
-    JSFunction function = frame->function();
+    Tagged<JSFunction> function = frame->function();
     if (!frame->is_interpreted()) continue;
-    if (function.shared() != shared_) continue;
+    if (function->shared() != shared_) continue;
     InterpretedFrame* interpreted_frame =
         reinterpret_cast<InterpretedFrame*>(frame);
-    BytecodeArray bytecode = mode_ == Mode::kUseDebugBytecode
-                                 ? shared_.GetDebugInfo().DebugBytecodeArray()
-                                 : shared_.GetBytecodeArray(isolate);
+    Tagged<BytecodeArray> bytecode =
+        mode_ == Mode::kUseDebugBytecode
+            ? shared_->GetDebugInfo(isolate)->DebugBytecodeArray(isolate)
+            : shared_->GetBytecodeArray(isolate);
     interpreted_frame->PatchBytecodeArray(bytecode);
   }
 }

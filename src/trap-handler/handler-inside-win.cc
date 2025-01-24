@@ -30,9 +30,15 @@
 #include "src/trap-handler/trap-handler-internal.h"
 #include "src/trap-handler/trap-handler.h"
 
+#ifdef V8_TRAP_HANDLER_VIA_SIMULATOR
+#include "src/trap-handler/trap-handler-simulator.h"
+#endif
+
 namespace v8 {
 namespace internal {
 namespace trap_handler {
+
+#if V8_TRAP_HANDLER_SUPPORTED
 
 // The below struct needed to access the offset in the Thread Environment Block
 // to see if the thread local storage for the thread has been allocated yet.
@@ -48,6 +54,13 @@ struct TEB {
   PVOID reserved[11];
   PVOID thread_local_storage_pointer;
 };
+
+#ifdef V8_TRAP_HANDLER_VIA_SIMULATOR
+// This is the address where we continue on a failed "ProbeMemory". It's defined
+// in "handler-outside-simulator.cc".
+extern char probe_memory_continuation[] asm(
+    "v8_simulator_probe_memory_continuation");
+#endif  // V8_TRAP_HANDLER_VIA_SIMULATOR
 
 bool TryHandleWasmTrap(EXCEPTION_POINTERS* exception) {
   // VectoredExceptionHandlers need extreme caution. Do as little as possible
@@ -71,35 +84,54 @@ bool TryHandleWasmTrap(EXCEPTION_POINTERS* exception) {
   // need to run to initialize values may not have run yet, but that is not
   // the case for any thread_locals used here).
   TEB* pteb = reinterpret_cast<TEB*>(NtCurrentTeb());
-  if (!pteb->thread_local_storage_pointer) {
-    return false;
-  }
+  if (!pteb->thread_local_storage_pointer) return false;
 
   // Now safe to run more advanced logic, which may access thread_locals
   // Ensure the faulting thread was actually running Wasm code.
-  if (!IsThreadInWasm()) {
-    return false;
-  }
+  if (!IsThreadInWasm()) return false;
 
   // Clear g_thread_in_wasm_code, primarily to protect against nested faults.
+  // The only path that resets the flag to true is if we find a landing pad (in
+  // which case this function returns true). Otherwise we leave the flag unset
+  // since we do not return to wasm code.
   g_thread_in_wasm_code = false;
 
   const EXCEPTION_RECORD* record = exception->ExceptionRecord;
 
   uintptr_t fault_addr = reinterpret_cast<uintptr_t>(record->ExceptionAddress);
-  uintptr_t landing_pad = 0;
 
-  if (TryFindLandingPad(fault_addr, &landing_pad)) {
-    exception->ContextRecord->Rip = landing_pad;
-    // We will return to wasm code, so restore the g_thread_in_wasm_code flag.
-    g_thread_in_wasm_code = true;
-    return true;
-  }
+#ifdef V8_TRAP_HANDLER_VIA_SIMULATOR
+  // Only handle signals triggered by the load in {ProbeMemory}.
+  if (fault_addr != reinterpret_cast<uintptr_t>(&ProbeMemory)) return false;
 
-  // If we get here, it's not a recoverable wasm fault, so we go to the next
-  // handler. Leave the g_thread_in_wasm_code flag unset since we do not return
-  // to wasm code.
-  return false;
+  // The simulated ip will be in the second parameter register (%rdx).
+  uintptr_t simulated_ip = exception->ContextRecord->Rdx;
+  if (!IsFaultAddressCovered(simulated_ip)) return false;
+
+  exception->ContextRecord->Rax = gLandingPad;
+  // The fault_address that is set in non-simulator builds here is set in the
+  // simulator directly.
+  // Continue at the memory probing continuation.
+  exception->ContextRecord->Rip =
+      reinterpret_cast<uintptr_t>(&probe_memory_continuation);
+#else
+  if (!IsFaultAddressCovered(fault_addr)) return false;
+
+  TH_DCHECK(gLandingPad != 0);
+  // Tell the caller to return to the landing pad.
+#if V8_HOST_ARCH_X64
+  exception->ContextRecord->Rip = gLandingPad;
+  exception->ContextRecord->R10 = fault_addr;
+#elif V8_HOST_ARCH_ARM64
+  exception->ContextRecord->Pc = gLandingPad;
+  exception->ContextRecord->X16 = fault_addr;
+#else
+#error Unsupported architecture
+#endif  // V8_HOST_ARCH_X64
+#endif  // V8_TRAP_HANDLER_VIA_SIMULATOR
+  // We will return to wasm code, so restore the g_thread_in_wasm_code flag.
+  g_thread_in_wasm_code = true;
+  return true;
 }
 
 LONG HandleWasmTrap(EXCEPTION_POINTERS* exception) {
@@ -108,6 +140,8 @@ LONG HandleWasmTrap(EXCEPTION_POINTERS* exception) {
   }
   return EXCEPTION_CONTINUE_SEARCH;
 }
+
+#endif
 
 }  // namespace trap_handler
 }  // namespace internal

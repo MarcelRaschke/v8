@@ -11,11 +11,11 @@
 namespace v8 {
 namespace internal {
 
-enum FunctionKind : uint8_t {
+enum class FunctionKind : uint8_t {
   // BEGIN constructable functions
   kNormalFunction,
   kModule,
-  kAsyncModule,
+  kModuleWithTopLevelAwait,
   // BEGIN class constructors
   // BEGIN base constructors
   kBaseConstructor,
@@ -60,12 +60,14 @@ enum FunctionKind : uint8_t {
   kClassMembersInitializerFunction,
   kClassStaticInitializerFunction,
   // END concise methods 2
+  kInvalid,
 
   kLastFunctionKind = kClassStaticInitializerFunction,
 };
 
 constexpr int kFunctionKindBitSize = 5;
-STATIC_ASSERT(kLastFunctionKind < (1 << kFunctionKindBitSize));
+static_assert(static_cast<int>(FunctionKind::kLastFunctionKind) <
+              (1 << kFunctionKindBitSize));
 
 inline bool IsArrowFunction(FunctionKind kind) {
   return base::IsInRange(kind, FunctionKind::kArrowFunction,
@@ -74,11 +76,11 @@ inline bool IsArrowFunction(FunctionKind kind) {
 
 inline bool IsModule(FunctionKind kind) {
   return base::IsInRange(kind, FunctionKind::kModule,
-                         FunctionKind::kAsyncModule);
+                         FunctionKind::kModuleWithTopLevelAwait);
 }
 
-inline bool IsAsyncModule(FunctionKind kind) {
-  return kind == FunctionKind::kAsyncModule;
+inline bool IsModuleWithTopLevelAwait(FunctionKind kind) {
+  return kind == FunctionKind::kModuleWithTopLevelAwait;
 }
 
 inline bool IsAsyncGeneratorFunction(FunctionKind kind) {
@@ -209,7 +211,7 @@ inline const char* FunctionKind2String(FunctionKind kind) {
       return "AsyncFunction";
     case FunctionKind::kModule:
       return "Module";
-    case FunctionKind::kAsyncModule:
+    case FunctionKind::kModuleWithTopLevelAwait:
       return "AsyncModule";
     case FunctionKind::kClassMembersInitializerFunction:
       return "ClassMembersInitializerFunction";
@@ -235,6 +237,8 @@ inline const char* FunctionKind2String(FunctionKind kind) {
       return "StaticAsyncConciseGeneratorMethod";
     case FunctionKind::kAsyncGeneratorFunction:
       return "AsyncGeneratorFunction";
+    case FunctionKind::kInvalid:
+      return "Invalid";
   }
   UNREACHABLE();
 }

@@ -5,10 +5,9 @@
 #ifndef V8_EXECUTION_POINTER_AUTHENTICATION_H_
 #define V8_EXECUTION_POINTER_AUTHENTICATION_H_
 
-#include "include/v8.h"
+#include "include/v8-internal.h"
 #include "src/base/macros.h"
 #include "src/common/globals.h"
-#include "src/deoptimizer/deoptimizer.h"
 
 namespace v8 {
 namespace internal {
@@ -38,7 +37,15 @@ class PointerAuthentication : public AllStatic {
   // When CFI is enabled, sign {pc} using {sp}, check the address and return the
   // signed value. When CFI is not enabled, return {pc} unmodified. This method
   // only applies in the deoptimizer.
-  V8_INLINE static Address SignAndCheckPC(Address pc, Address sp);
+  V8_INLINE static Address SignAndCheckPC(Isolate* isolate, Address pc,
+                                          Address sp);
+
+  // When CFI is enabled, verify that {pc} is signed correctly for {old_sp},
+  // then re-sign {pc} using {new_sp} and return the signed value. When CFI is
+  // not enabled, return {pc} unmodified. This method only applies in the
+  // deoptimizer for wasm deoptimizations.
+  V8_INLINE static Address MoveSignedPC(Isolate* isolate, Address pc,
+                                        Address new_sp, Address old_sp);
 };
 
 }  // namespace internal

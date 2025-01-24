@@ -21,77 +21,78 @@ class WeakCell;
 
 // FinalizationRegistry object from the JS Weak Refs spec proposal:
 // https://github.com/tc39/proposal-weakrefs
-class JSFinalizationRegistry : public JSObject {
+class JSFinalizationRegistry
+    : public TorqueGeneratedJSFinalizationRegistry<JSFinalizationRegistry,
+                                                   JSObject> {
  public:
   DECL_PRINTER(JSFinalizationRegistry)
   EXPORT_DECL_VERIFIER(JSFinalizationRegistry)
-  DECL_CAST(JSFinalizationRegistry)
-
-  DECL_ACCESSORS(native_context, NativeContext)
-  DECL_ACCESSORS(cleanup, Object)
-
-  DECL_ACCESSORS(active_cells, HeapObject)
-  DECL_ACCESSORS(cleared_cells, HeapObject)
-  DECL_ACCESSORS(key_map, Object)
-
-  DECL_ACCESSORS(next_dirty, Object)
-
-  DECL_INT_ACCESSORS(flags)
 
   DECL_BOOLEAN_ACCESSORS(scheduled_for_cleanup)
 
   class BodyDescriptor;
 
   inline static void RegisterWeakCellWithUnregisterToken(
-      Handle<JSFinalizationRegistry> finalization_registry,
-      Handle<WeakCell> weak_cell, Isolate* isolate);
+      DirectHandle<JSFinalizationRegistry> finalization_registry,
+      DirectHandle<WeakCell> weak_cell, Isolate* isolate);
   inline static bool Unregister(
-      Handle<JSFinalizationRegistry> finalization_registry,
-      Handle<JSReceiver> unregister_token, Isolate* isolate);
+      DirectHandle<JSFinalizationRegistry> finalization_registry,
+      DirectHandle<HeapObject> unregister_token, Isolate* isolate);
 
   // RemoveUnregisterToken is called from both Unregister and during GC. Since
   // it modifies slots in key_map and WeakCells and the normal write barrier is
   // disabled during GC, we need to tell the GC about the modified slots via the
   // gc_notify_updated_slot function.
-  template <typename MatchCallback, typename GCNotifyUpdatedSlotCallback>
+  enum RemoveUnregisterTokenMode {
+    kRemoveMatchedCellsFromRegistry,
+    kKeepMatchedCellsInRegistry
+  };
+  template <typename GCNotifyUpdatedSlotCallback>
   inline bool RemoveUnregisterToken(
-      JSReceiver unregister_token, Isolate* isolate,
-      MatchCallback match_callback,
+      Tagged<HeapObject> unregister_token, Isolate* isolate,
+      RemoveUnregisterTokenMode removal_mode,
       GCNotifyUpdatedSlotCallback gc_notify_updated_slot);
 
   // Returns true if the cleared_cells list is non-empty.
   inline bool NeedsCleanup() const;
 
+  V8_EXPORT_PRIVATE Tagged<WeakCell> PopClearedCell(
+      Isolate* isolate, bool* key_map_may_need_shrink);
+
+  static void ShrinkKeyMap(
+      Isolate* isolate,
+      DirectHandle<JSFinalizationRegistry> finalization_registry);
+
+  // Pop cleared cells and call their finalizers.
+  static Maybe<bool> Cleanup(
+      Isolate* isolate,
+      DirectHandle<JSFinalizationRegistry> finalization_registry);
+
   // Remove the already-popped weak_cell from its unregister token linked list,
   // as well as removing the entry from the key map if it is the only WeakCell
   // with its unregister token. This method cannot GC and does not shrink the
   // key map. Asserts that weak_cell has a non-undefined unregister token.
-  //
-  // It takes raw Addresses because it is called from CSA and Torque.
-  V8_EXPORT_PRIVATE static void RemoveCellFromUnregisterTokenMap(
-      Isolate* isolate, Address raw_finalization_registry,
-      Address raw_weak_cell);
-
-  // Layout description.
-  DEFINE_FIELD_OFFSET_CONSTANTS(
-      JSObject::kHeaderSize, TORQUE_GENERATED_JS_FINALIZATION_REGISTRY_FIELDS)
+  V8_EXPORT_PRIVATE void RemoveCellFromUnregisterTokenMap(
+      Isolate* isolate, Tagged<WeakCell> weak_cell);
 
   // Bitfields in flags.
   DEFINE_TORQUE_GENERATED_FINALIZATION_REGISTRY_FLAGS()
 
-  OBJECT_CONSTRUCTORS(JSFinalizationRegistry, JSObject);
+  TQ_OBJECT_CONSTRUCTORS(JSFinalizationRegistry)
 };
 
 // Internal object for storing weak references in JSFinalizationRegistry.
 class WeakCell : public TorqueGeneratedWeakCell<WeakCell, HeapObject> {
  public:
-  DECL_PRINTER(WeakCell)
   EXPORT_DECL_VERIFIER(WeakCell)
 
   class BodyDescriptor;
 
   // Provide relaxed load access to target field.
-  inline HeapObject relaxed_target() const;
+  inline Tagged<HeapObject> relaxed_target() const;
+
+  // Provide relaxed load access to the unregister token field.
+  inline Tagged<HeapObject> relaxed_unregister_token() const;
 
   // Nullify is called during GC and it modifies the pointers in WeakCell and
   // JSFinalizationRegistry. Thus we need to tell the GC about the modified

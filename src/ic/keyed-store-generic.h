@@ -11,6 +11,11 @@
 namespace v8 {
 namespace internal {
 
+class KeyedStoreMegamorphicGenerator {
+ public:
+  static void Generate(compiler::CodeAssemblerState* state);
+};
+
 class KeyedStoreGenericGenerator {
  public:
   static void Generate(compiler::CodeAssemblerState* state);
@@ -28,13 +33,23 @@ class KeyedStoreGenericGenerator {
                           TNode<Object> key, TNode<Object> value,
                           LanguageMode language_mode);
 
-  static void SetPropertyInLiteral(compiler::CodeAssemblerState* state,
-                                   TNode<Context> context,
-                                   TNode<JSObject> receiver, TNode<Object> key,
-                                   TNode<Object> value);
+  static void CreateDataProperty(compiler::CodeAssemblerState* state,
+                                 TNode<Context> context,
+                                 TNode<JSObject> receiver, TNode<Object> key,
+                                 TNode<Object> value);
+};
+
+class DefineKeyedOwnGenericGenerator {
+ public:
+  static void Generate(compiler::CodeAssemblerState* state);
 };
 
 class StoreICNoFeedbackGenerator {
+ public:
+  static void Generate(compiler::CodeAssemblerState* state);
+};
+
+class DefineNamedOwnICNoFeedbackGenerator {
  public:
   static void Generate(compiler::CodeAssemblerState* state);
 };

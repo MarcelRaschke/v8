@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 
+#include "include/v8-platform.h"
 #include "src/base/macros.h"
 #include "src/logging/tracing-flags.h"
 

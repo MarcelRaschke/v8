@@ -2,14 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-threads
-
-load('test/mjsunit/wasm/wasm-module-builder.js');
+d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 const builder = new WasmModuleBuilder();
-builder.addMemory(1, 1, false, true);
-builder.addGlobal(kWasmI32, 1);
-builder.addGlobal(kWasmI32, 1);
+builder.addMemory(1, 1, true);
+builder.addGlobal(kWasmI32, true, false);
+builder.addGlobal(kWasmI32, true, false);
 builder.addType(makeSig([kWasmI32, kWasmI64, kWasmI32], []));
 // Generate function 1 (out of 1).
 builder.addFunction(undefined, 0 /* sig */)
@@ -21,7 +19,7 @@ kExprI32Const, 0x00,  // i32.const
 kExprLocalSet, 0x04,  // local.set
 kExprI32Const, 0x01,  // i32.const
 kExprLocalSet, 0x05,  // local.set
-kExprBlock, kWasmStmt,  // block @11
+kExprBlock, kWasmVoid,  // block @11
   kExprBr, 0x00,  // br depth=0
   kExprEnd,  // end @15
 kExprGlobalGet, 0x01,  // global.get
@@ -35,7 +33,7 @@ kExprLocalSet, 0x01,  // local.set
 kExprI32Const, 0x00,  // i32.const
 kExprI32Eqz,  // i32.eqz
 kExprLocalSet, 0x07,  // local.set
-kExprBlock, kWasmStmt,  // block @36
+kExprBlock, kWasmVoid,  // block @36
   kExprBr, 0x00,  // br depth=0
   kExprEnd,  // end @40
 kExprGlobalGet, 0x01,  // global.get

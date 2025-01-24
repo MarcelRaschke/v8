@@ -2,6 +2,10 @@
 // this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_WASM_DEBUG_H_
 #define V8_WASM_WASM_DEBUG_H_
 
@@ -13,25 +17,24 @@
 #include "src/base/iterator.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "src/utils/vector.h"
+#include "src/base/vector.h"
 #include "src/wasm/value-type.h"
+#include "src/wasm/wasm-subtyping.h"
 
 namespace v8 {
 namespace internal {
 
-template <typename T>
-class Handle;
 class WasmFrame;
 
 namespace wasm {
 
 class DebugInfoImpl;
-class IndirectNameMap;
 class NativeModule;
 class WasmCode;
-class WireBytesRef;
-class WasmValue;
 struct WasmFunction;
+struct WasmModule;
+class WasmValue;
+class WireBytesRef;
 
 // Side table storing information used to inspect Liftoff frames at runtime.
 // This table is only created on demand for debugging, so it is not optimized
@@ -44,6 +47,7 @@ class DebugSideTable {
     struct Value {
       int index;
       ValueType type;
+      const WasmModule* module;
       Storage storage;
       union {
         int32_t i32_const;  // if kind == kConstant
@@ -53,7 +57,9 @@ class DebugSideTable {
 
       bool operator==(const Value& other) const {
         if (index != other.index) return false;
-        if (type != other.type) return false;
+        if (!EquivalentTypes(type, other.type, module, other.module)) {
+          return false;
+        }
         if (storage != other.storage) return false;
         switch (storage) {
           case kConstant:
@@ -83,8 +89,8 @@ class DebugSideTable {
     // Stack height, including locals.
     int stack_height() const { return stack_height_; }
 
-    Vector<const Value> changed_values() const {
-      return VectorOf(changed_values_);
+    base::Vector<const Value> changed_values() const {
+      return base::VectorOf(changed_values_);
     }
 
     const Value* FindChangedValue(int stack_index) const {
@@ -99,6 +105,8 @@ class DebugSideTable {
     }
 
     void Print(std::ostream&) const;
+
+    size_t EstimateCurrentMemoryConsumption() const;
 
    private:
     int pc_offset_;
@@ -148,6 +156,8 @@ class DebugSideTable {
 
   void Print(std::ostream&) const;
 
+  size_t EstimateCurrentMemoryConsumption() const;
+
  private:
   struct EntryPositionLess {
     bool operator()(const Entry& a, const Entry& b) const {
@@ -169,33 +179,19 @@ class V8_EXPORT_PRIVATE DebugInfo {
   // For the frame inspection methods below:
   // {fp} is the frame pointer of the Liftoff frame, {debug_break_fp} that of
   // the {WasmDebugBreak} frame (if any).
-  int GetNumLocals(Address pc);
+  int GetNumLocals(Address pc, Isolate* isolate);
   WasmValue GetLocalValue(int local, Address pc, Address fp,
                           Address debug_break_fp, Isolate* isolate);
-  int GetStackDepth(Address pc);
+  int GetStackDepth(Address pc, Isolate* isolate);
 
-  const wasm::WasmFunction& GetFunctionAtAddress(Address pc);
+  const wasm::WasmFunction& GetFunctionAtAddress(Address pc, Isolate* isolate);
 
   WasmValue GetStackValue(int index, Address pc, Address fp,
                           Address debug_break_fp, Isolate* isolate);
 
-  // Returns the name of the entity (with the given |index| and |kind|) derived
-  // from the exports table. If the entity is not exported, an empty reference
-  // will be returned instead.
-  WireBytesRef GetExportName(ImportExportKindCode kind, uint32_t index);
-
-  // Returns the module and field name of the entity (with the given |index|
-  // and |kind|) derived from the imports table. If the entity is not imported,
-  // a pair of empty references will be returned instead.
-  std::pair<WireBytesRef, WireBytesRef> GetImportName(ImportExportKindCode kind,
-                                                      uint32_t index);
-
-  WireBytesRef GetTypeName(int type_index);
-  WireBytesRef GetLocalName(int func_index, int local_index);
-  WireBytesRef GetFieldName(int struct_index, int field_index);
-
   void SetBreakpoint(int func_index, int offset, Isolate* current_isolate);
 
+  bool IsFrameBlackboxed(WasmFrame* frame);
   // Returns true if we stay inside the passed frame (or a called frame) after
   // the step. False if the frame will return after the step.
   bool PrepareStep(WasmFrame*);
@@ -204,17 +200,24 @@ class V8_EXPORT_PRIVATE DebugInfo {
 
   void ClearStepping(Isolate*);
 
+  // Remove stepping code from a single frame; this is a performance
+  // optimization only, hitting debug breaks while not stepping and not at a set
+  // breakpoint would be unobservable otherwise.
+  void ClearStepping(WasmFrame*);
+
   bool IsStepping(WasmFrame*);
 
   void RemoveBreakpoint(int func_index, int offset, Isolate* current_isolate);
 
-  void RemoveDebugSideTables(Vector<WasmCode* const>);
+  void RemoveDebugSideTables(base::Vector<WasmCode* const>);
 
   // Return the debug side table for the given code object, but only if it has
   // already been created. This will never trigger generation of the table.
   DebugSideTable* GetDebugSideTableIfExists(const WasmCode*) const;
 
   void RemoveIsolate(Isolate*);
+
+  size_t EstimateCurrentMemoryConsumption() const;
 
  private:
   std::unique_ptr<DebugInfoImpl> impl_;

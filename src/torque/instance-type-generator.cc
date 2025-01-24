@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
+
 #include "src/torque/implementation-visitor.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 namespace {
 
@@ -257,7 +257,7 @@ int SolveInstanceTypeConstraints(
   }
   root->num_values = root->end - root->start + 1;
   root->type->InitializeInstanceTypes(
-      root->value == -1 ? base::Optional<int>{} : root->value,
+      root->value == -1 ? std::optional<int>{} : root->value,
       std::make_pair(root->start, root->end));
 
   if (root->num_values > 0) {
@@ -327,8 +327,9 @@ void PrintInstanceTypes(InstanceTypeTree* root, std::ostream& definitions,
   }
   if (root->num_own_values == 1) {
     definitions << inner_indent << "V(" << type_name << ", " << root->value
-                << ") \\\n";
-    values << "  V(" << type_name << ") \\\n";
+                << ") /* " << root->type->GetPosition() << " */\\\n";
+    values << "  V(" << type_name << ") /* " << root->type->GetPosition()
+           << " */\\\n";
     std::ostream& type_checker_list =
         root->type->HasUndefinedLayout()
             ? (root->num_values == 1 ? only_declared_single_instance_types
@@ -336,7 +337,7 @@ void PrintInstanceTypes(InstanceTypeTree* root, std::ostream& definitions,
             : (root->num_values == 1 ? fully_defined_single_instance_types
                                      : fully_defined_multiple_instance_types);
     type_checker_list << "  V(" << root->type->name() << ", " << type_name
-                      << ") \\\n";
+                      << ") /* " << root->type->GetPosition() << " */ \\\n";
   }
   for (auto& child : root->children) {
     PrintInstanceTypes(child.get(), definitions, values,
@@ -459,20 +460,23 @@ void ImplementationVisitor::GenerateInstanceTypes(
       std::string instance_type_name =
           CapifyStringWithUnderscores(type->name()) + "_TYPE";
 
-      if (type->IsExtern()) continue;
-      torque_defined_class_list << "  V(" << upper_case_name << ") \\\n";
+      if (!type->IsExtern()) {
+        torque_defined_class_list << "  V(" << upper_case_name << ") \\\n";
+      }
 
-      if (type->IsAbstract() || type->HasCustomMap()) continue;
-      torque_defined_map_csa_list << "  V(_, " << upper_case_name << "Map, "
-                                  << lower_case_name << "_map, "
-                                  << upper_case_name << ") \\\n";
-      torque_defined_map_root_list << "  V(Map, " << lower_case_name << "_map, "
-                                   << upper_case_name << "Map) \\\n";
-      std::stringstream& list = type->HasStaticSize()
-                                    ? torque_defined_fixed_instance_type_list
-                                    : torque_defined_varsize_instance_type_list;
-      list << "  V(" << instance_type_name << ", " << upper_case_name << ", "
-           << lower_case_name << ") \\\n";
+      if (type->ShouldGenerateUniqueMap()) {
+        torque_defined_map_csa_list << "  V(_, " << upper_case_name << "Map, "
+                                    << lower_case_name << "_map, "
+                                    << upper_case_name << ") \\\n";
+        torque_defined_map_root_list << "  V(Map, " << lower_case_name
+                                     << "_map, " << upper_case_name
+                                     << "Map) \\\n";
+        std::stringstream& list =
+            type->HasStaticSize() ? torque_defined_fixed_instance_type_list
+                                  : torque_defined_varsize_instance_type_list;
+        list << "  V(" << instance_type_name << ", " << upper_case_name << ", "
+             << lower_case_name << ") \\\n";
+      }
     }
 
     header << "// Fully Torque-defined classes (both internal and exported).\n";
@@ -502,6 +506,4 @@ void ImplementationVisitor::GenerateInstanceTypes(
   GlobalContext::SetInstanceTypesInitialized();
 }
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque

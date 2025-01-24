@@ -6,10 +6,13 @@
 
 #include <cmath>
 
-#include "base/trace_event/common/trace_event_common.h"
 #include "include/v8-platform.h"
 #include "src/base/platform/platform.h"
+#include "src/tracing/trace-event-no-perfetto.h"
+
+#if defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
 #include "src/libplatform/tracing/recorder.h"
+#endif
 
 namespace v8 {
 namespace platform {
@@ -85,7 +88,7 @@ void JSONTraceWriter::AppendArgValue(uint8_t type,
         }
       } else if (std::isnan(val)) {
         // The JSON spec doesn't allow NaN and Infinity (since these are
-        // objects in EcmaScript).  Use strings instead.
+        // objects in ECMAScript).  Use strings instead.
         real = "\"NaN\"";
       } else if (val < 0) {
         real = "\"-Infinity\"";
@@ -191,6 +194,7 @@ TraceWriter* TraceWriter::CreateJSONTraceWriter(std::ostream& stream,
   return new JSONTraceWriter(stream, tag);
 }
 
+#if defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
 SystemInstrumentationTraceWriter::SystemInstrumentationTraceWriter() {
   recorder_ = std::make_unique<Recorder>();
 }
@@ -211,6 +215,7 @@ void SystemInstrumentationTraceWriter::Flush() {}
 TraceWriter* TraceWriter::CreateSystemInstrumentationTraceWriter() {
   return new SystemInstrumentationTraceWriter();
 }
+#endif
 
 }  // namespace tracing
 }  // namespace platform

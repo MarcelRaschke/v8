@@ -60,7 +60,7 @@ class ThreadVisitor {
 class ThreadManager {
  public:
   void Lock();
-  void Unlock();
+  V8_EXPORT_PRIVATE void Unlock();
 
   void InitThread(const ExecutionAccess&);
   void ArchiveThread();
@@ -91,7 +91,7 @@ class ThreadManager {
 
   void EagerlyArchiveThread();
 
-  base::Mutex mutex_;
+  base::SpinningMutex mutex_;
   // {ThreadId} must be trivially copyable to be stored in {std::atomic}.
   ASSERT_TRIVIALLY_COPYABLE(i::ThreadId);
   std::atomic<ThreadId> mutex_owner_;

@@ -83,12 +83,19 @@ const SOFT_SKIPPED_FILES = [
     // Tests slow to parse.
     // CrashTests:
     /^jquery.*\.js/,
+    /^js-test-pre\.js/,
     // Spidermonkey:
     'regress-308085.js',
     'regress-74474-002.js',
     'regress-74474-003.js',
     // V8:
     'object-literal.js',
+    'regress-390568195.js',
+];
+
+// Used with a lower probability if paths match.
+const SOFT_SKIPPED_PATHS = [
+    /webgl/,
 ];
 
 // Flags that lead to false positives or that are already passed by default.
@@ -97,19 +104,26 @@ const DISALLOWED_FLAGS = [
     // stabilized yet and would cause too much noise when enabled.
     /^--experimental-.*/,
 
-    // Disallowed due to noise. We explicitly add --es-staging to job
-    // definitions, and all of these features are staged before launch.
-    /^--harmony-.*/,
+    // Disallowed due to noise. We explicitly add --harmony and --js-staging
+    // to trials, and all of these features are staged before launch.
+    /^--harmony-(?!shipping)/,
+    /^--js-(?!staging|shipping)/,
 
     // Disallowed because they are passed explicitly on the command line.
     '--allow-natives-syntax',
     '--debug-code',
-    '--es-staging',
-    '--wasm-staging',
+    '--disable-abortjs',
+    '--enable-slow-asserts',
     '--expose-gc',
     '--expose_gc',
-    '--icu-data-file',
-    '--random-seed',
+    '--fuzzing',
+    '--omit-quit',
+    '--disable-in-process-stack-traces',
+    '--invoke-weak-callbacks',
+    '--verify-heap',
+
+    /^--icu-data-file.*/,
+    /^--random-seed.*/,
 
     // Disallowed due to false positives.
     '--check-handle-count',
@@ -118,7 +132,7 @@ const DISALLOWED_FLAGS = [
     '--expose-natives-as',
     '--expose-trigger-failure',
     '--mock-arraybuffer-allocator',
-    'natives',  // Used in conjuction with --expose-natives-as.
+    'natives',  // Used in conjunction with --expose-natives-as.
     /^--trace-path.*/,
 ];
 
@@ -140,26 +154,19 @@ const DISALLOWED_DIFFERENTIAL_FUZZ_FLAGS = [
     /^--trace.*/,
     '--expose-externalize-string',
     '--interpreted-frames-native-stack',
-    '--stress-opt',
     '--validate-asm',
 ];
 
-const ALLOWED_RUNTIME_FUNCTIONS = new Set([
-    // List of allowed runtime functions. Others will be replaced with no-ops.
-    'ArrayBufferDetach',
-    'DeoptimizeFunction',
-    'DeoptimizeNow',
-    'EnableCodeLoggingForTesting',
-    'GetUndetectable',
-    'HeapObjectVerify',
-    'IsBeingInterpreted',
-    'NeverOptimizeFunction',
-    'OptimizeFunctionOnNextCall',
-    'OptimizeOsr',
-    'PrepareFunctionForOptimization',
-    'SetAllocationTimeout',
-    'SimulateNewspaceFull',
-]);
+// Pairs of flags that shouldn't be used together.
+const CONTRADICTORY_FLAGS = [
+    ['--assert-types', '--stress-concurrent-inlining'],
+    ['--assert-types', '--stress-concurrent-inlining-attach-code'],
+    ['--jitless', '--maglev'],
+    ['--jitless', '--maglev-future'],
+    ['--jitless', '--stress-maglev'],
+    ['--jitless', '--stress-concurrent-inlining'],
+    ['--jitless', '--stress-concurrent-inlining-attach-code'],
+]
 
 const MAX_FILE_SIZE_BYTES = 128 * 1024;  // 128KB
 const MEDIUM_FILE_SIZE_BYTES = 32 * 1024;  // 32KB
@@ -217,6 +224,11 @@ function getSoftSkipped() {
 }
 
 // For testing.
+function getSoftSkippedPaths() {
+  return SOFT_SKIPPED_PATHS;
+}
+
+// For testing.
 function getGeneratedSoftSkipped() {
   return generatedSoftSkipped;
 }
@@ -227,6 +239,10 @@ function getGeneratedSloppy() {
 }
 
 function isTestSoftSkippedAbs(absPath) {
+  if (_findMatch(this.getSoftSkippedPaths(), absPath)) {
+    return true;
+  }
+
   const basename = path.basename(absPath);
   if (_findMatch(this.getSoftSkipped(), basename)) {
     return true;
@@ -254,29 +270,38 @@ function filterFlags(flags) {
   });
 }
 
+/**
+ * Randomly drops flags to resolve contradicions defined by
+ * `CONTRADICTORY_FLAGS`.
+ */
+function resolveContradictoryFlags(flags) {
+  const flagSet = new Set(flags);
+  for (const [flag1, flag2] of this.CONTRADICTORY_FLAGS) {
+    if (flagSet.has(flag1) && flagSet.has(flag2)) {
+      flagSet.delete(random.single([flag1, flag2]));
+    }
+  }
+  return Array.from(flagSet.values());
+}
+
 function filterDifferentialFuzzFlags(flags) {
   return flags.filter(
       flag => _doesntMatch(DISALLOWED_DIFFERENTIAL_FUZZ_FLAGS, flag));
 }
 
-function isAllowedRuntimeFunction(name) {
-  if (process.env.APP_NAME != 'd8') {
-    return false;
-  }
-
-  return ALLOWED_RUNTIME_FUNCTIONS.has(name);
-}
 
 module.exports = {
+  CONTRADICTORY_FLAGS: CONTRADICTORY_FLAGS,
   filterDifferentialFuzzFlags: filterDifferentialFuzzFlags,
   filterFlags: filterFlags,
   getGeneratedSoftSkipped: getGeneratedSoftSkipped,
   getGeneratedSloppy: getGeneratedSloppy,
   getSoftSkipped: getSoftSkipped,
-  isAllowedRuntimeFunction: isAllowedRuntimeFunction,
+  getSoftSkippedPaths: getSoftSkippedPaths,
   isTestSkippedAbs: isTestSkippedAbs,
   isTestSkippedRel: isTestSkippedRel,
   isTestSoftSkippedAbs: isTestSoftSkippedAbs,
   isTestSoftSkippedRel: isTestSoftSkippedRel,
   isTestSloppyRel: isTestSloppyRel,
+  resolveContradictoryFlags: resolveContradictoryFlags,
 }

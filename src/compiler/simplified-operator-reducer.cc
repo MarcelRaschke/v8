@@ -4,12 +4,16 @@
 
 #include "src/compiler/simplified-operator-reducer.h"
 
+#include <optional>
+
+#include "src/compiler/common-operator.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-matchers.h"
+#include "src/compiler/opcodes.h"
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/simplified-operator.h"
-#include "src/compiler/type-cache.h"
 #include "src/numbers/conversions-inl.h"
 
 namespace v8 {
@@ -32,16 +36,18 @@ Decision DecideObjectIsSmi(Node* const input) {
 
 }  // namespace
 
-SimplifiedOperatorReducer::SimplifiedOperatorReducer(Editor* editor,
-                                                     JSGraph* jsgraph,
-                                                     JSHeapBroker* broker)
-    : AdvancedReducer(editor), jsgraph_(jsgraph), broker_(broker) {}
+SimplifiedOperatorReducer::SimplifiedOperatorReducer(
+    Editor* editor, JSGraph* jsgraph, JSHeapBroker* broker,
+    BranchSemantics branch_semantics)
+    : AdvancedReducer(editor),
+      jsgraph_(jsgraph),
+      broker_(broker),
+      branch_semantics_(branch_semantics) {}
 
 SimplifiedOperatorReducer::~SimplifiedOperatorReducer() = default;
 
 
 Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
-  DisallowHeapAccessIf no_heap_access(!FLAG_turbo_direct_heap_access);
   switch (node->opcode()) {
     case IrOpcode::kBooleanNot: {
       HeapObjectMatcher m(node->InputAt(0));
@@ -60,7 +66,9 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kChangeTaggedToBit: {
       HeapObjectMatcher m(node->InputAt(0));
       if (m.HasResolvedValue()) {
-        return ReplaceInt32(m.Ref(broker()).BooleanValue());
+        std::optional<bool> maybe_result =
+            m.Ref(broker()).TryGetBooleanValue(broker());
+        if (maybe_result.has_value()) return ReplaceInt32(*maybe_result);
       }
       if (m.IsChangeBitToTagged()) return Replace(m.InputAt(0));
       break;
@@ -75,7 +83,7 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kChangeInt32ToTagged: {
       Int32Matcher m(node->InputAt(0));
       if (m.HasResolvedValue()) return ReplaceNumber(m.ResolvedValue());
-      if (m.IsChangeTaggedToInt32() || m.IsChangeTaggedSignedToInt32()) {
+      if (m.IsChangeTaggedSignedToInt32()) {
         return Replace(m.InputAt(0));
       }
       break;
@@ -165,6 +173,7 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
       }
       break;
     }
+    case IrOpcode::kCheckNumberFitsInt32:
     case IrOpcode::kCheckNumber: {
       NodeMatcher m(node->InputAt(0));
       if (m.IsConvertTaggedHoleToUndefined()) {
@@ -251,6 +260,7 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
                 node->ReplaceInput(0, n.left().node());
                 node->ReplaceInput(1, jsgraph()->Int32Constant(val));
                 RelaxEffectsAndControls(checked_int32_add);
+                checked_int32_add->Kill();
                 return Changed(node);
               }
             }
@@ -275,7 +285,11 @@ Reduction SimplifiedOperatorReducer::Change(Node* node, const Operator* op,
 }
 
 Reduction SimplifiedOperatorReducer::ReplaceBoolean(bool value) {
-  return Replace(jsgraph()->BooleanConstant(value));
+  if (branch_semantics_ == BranchSemantics::kJS) {
+    return Replace(jsgraph()->BooleanConstant(value));
+  } else {
+    return ReplaceInt32(value);
+  }
 }
 
 Reduction SimplifiedOperatorReducer::ReplaceFloat64(double value) {
@@ -289,12 +303,12 @@ Reduction SimplifiedOperatorReducer::ReplaceInt32(int32_t value) {
 
 
 Reduction SimplifiedOperatorReducer::ReplaceNumber(double value) {
-  return Replace(jsgraph()->Constant(value));
+  return Replace(jsgraph()->ConstantNoHole(value));
 }
 
 
 Reduction SimplifiedOperatorReducer::ReplaceNumber(int32_t value) {
-  return Replace(jsgraph()->Constant(value));
+  return Replace(jsgraph()->ConstantNoHole(value));
 }
 
 Factory* SimplifiedOperatorReducer::factory() const {

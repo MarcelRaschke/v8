@@ -35,6 +35,7 @@ namespace interpreter {
 
 #define UNSIGNED_FIXED_SCALAR_OPERAND_TYPE_LIST(V)    \
   V(Flag8, OperandTypeInfo::kFixedUnsignedByte)       \
+  V(Flag16, OperandTypeInfo::kFixedUnsignedShort)     \
   V(IntrinsicId, OperandTypeInfo::kFixedUnsignedByte) \
   V(RuntimeId, OperandTypeInfo::kFixedUnsignedShort)  \
   V(NativeContextIndex, OperandTypeInfo::kFixedUnsignedByte)
@@ -47,9 +48,10 @@ namespace interpreter {
   SIGNED_SCALABLE_SCALAR_OPERAND_TYPE_LIST(V)
 
 // Carefully ordered for operand type range checks below.
-#define REGISTER_OPERAND_TYPE_LIST(V) \
-  REGISTER_INPUT_OPERAND_TYPE_LIST(V) \
-  REGISTER_OUTPUT_OPERAND_TYPE_LIST(V)
+#define REGISTER_OPERAND_TYPE_LIST(V)  \
+  REGISTER_INPUT_OPERAND_TYPE_LIST(V)  \
+  REGISTER_OUTPUT_OPERAND_TYPE_LIST(V) \
+  V(RegInOut, OperandTypeInfo::kScalableSignedByte)
 
 // The list of operand types used by bytecodes.
 // Carefully ordered for operand type range checks below.
@@ -113,8 +115,10 @@ enum class ImplicitRegisterUse : uint8_t {
   kNone = 0,
   kReadAccumulator = 1 << 0,
   kWriteAccumulator = 1 << 1,
-  kWriteShortStar = 1 << 2,
+  kClobberAccumulator = 1 << 2,
+  kWriteShortStar = 1 << 3,
   kReadWriteAccumulator = kReadAccumulator | kWriteAccumulator,
+  kReadAndClobberAccumulator = kReadAccumulator | kClobberAccumulator,
   kReadAccumulatorWriteShortStar = kReadAccumulator | kWriteShortStar
 };
 
@@ -151,7 +155,6 @@ class BytecodeOperands : public AllStatic {
 #undef OPERAND_SCALE_COUNT
 
   static constexpr int OperandScaleAsIndex(OperandScale operand_scale) {
-#if V8_HAS_CXX14_CONSTEXPR
 #ifdef DEBUG
     int result = static_cast<int>(operand_scale) >> 1;
     switch (operand_scale) {
@@ -167,7 +170,6 @@ class BytecodeOperands : public AllStatic {
       default:
         UNREACHABLE();
     }
-#endif
 #endif
     return static_cast<int>(operand_scale) >> 1;
   }
@@ -188,6 +190,24 @@ class BytecodeOperands : public AllStatic {
            ImplicitRegisterUse::kWriteAccumulator;
   }
 
+  // Returns true if |implicit_register_use| clobbers the
+  // accumulator.
+  static constexpr bool ClobbersAccumulator(
+      ImplicitRegisterUse implicit_register_use) {
+    return (implicit_register_use & ImplicitRegisterUse::kClobberAccumulator) ==
+           ImplicitRegisterUse::kClobberAccumulator;
+  }
+
+  // Returns true if |implicit_register_use| writes or clobbers the
+  // accumulator.
+  static constexpr bool WritesOrClobbersAccumulator(
+      ImplicitRegisterUse implicit_register_use) {
+    return (implicit_register_use &
+            (ImplicitRegisterUse::kWriteAccumulator |
+             ImplicitRegisterUse::kClobberAccumulator)) !=
+           ImplicitRegisterUse::kNone;
+  }
+
   // Returns true if |implicit_register_use| writes to a
   // register not specified by an operand.
   static constexpr bool WritesImplicitRegister(
@@ -199,7 +219,7 @@ class BytecodeOperands : public AllStatic {
   // Returns true if |operand_type| is a scalable signed byte.
   static constexpr bool IsScalableSignedByte(OperandType operand_type) {
     return base::IsInRange(operand_type, OperandType::kImm,
-                           OperandType::kRegOutTriple);
+                           OperandType::kRegInOut);
   }
 
   // Returns true if |operand_type| is a scalable unsigned byte.

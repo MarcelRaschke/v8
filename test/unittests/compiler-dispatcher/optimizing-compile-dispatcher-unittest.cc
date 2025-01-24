@@ -4,6 +4,8 @@
 
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 
+#include <memory>
+
 #include "src/api/api-inl.h"
 #include "src/base/atomic-utils.h"
 #include "src/base/platform/semaphore.h"
@@ -26,14 +28,13 @@ using OptimizingCompileDispatcherTest = TestWithNativeContext;
 
 namespace {
 
-class BlockingCompilationJob : public OptimizedCompilationJob {
+class BlockingCompilationJob : public TurbofanCompilationJob {
  public:
   BlockingCompilationJob(Isolate* isolate, Handle<JSFunction> function)
-      : OptimizedCompilationJob(&info_, "BlockingCompilationJob",
-                                State::kReadyToExecute),
+      : TurbofanCompilationJob(isolate, &info_, State::kReadyToExecute),
         shared_(function->shared(), isolate),
         zone_(isolate->allocator(), ZONE_NAME),
-        info_(&zone_, isolate, shared_, function, CodeKind::TURBOFAN),
+        info_(&zone_, isolate, shared_, function, CodeKind::TURBOFAN_JS),
         blocking_(false),
         semaphore_(0) {}
   ~BlockingCompilationJob() override = default;
@@ -83,7 +84,8 @@ TEST_F(OptimizingCompileDispatcherTest, NonBlockingFlush) {
   OptimizingCompileDispatcher dispatcher(i_isolate());
   ASSERT_TRUE(OptimizingCompileDispatcher::Enabled());
   ASSERT_TRUE(dispatcher.IsQueueAvailable());
-  dispatcher.QueueForOptimization(job);
+  std::unique_ptr<TurbofanCompilationJob> compilation_job(job);
+  ASSERT_TRUE(dispatcher.TryQueueForOptimization(compilation_job));
 
   // Busy-wait for the job to run on a background thread.
   while (!job->IsBlocking()) {
@@ -94,7 +96,8 @@ TEST_F(OptimizingCompileDispatcherTest, NonBlockingFlush) {
 
   // Unblock the job & finish.
   job->Signal();
-  dispatcher.Stop();
+  dispatcher.StartTearDown();
+  dispatcher.FinishTearDown();
 }
 
 }  // namespace internal

@@ -4,121 +4,134 @@
 
 #include "src/common/assert-scope.h"
 
-#include "src/base/bit-field.h"
-#include "src/base/lazy-instance.h"
-#include "src/base/platform/platform.h"
+#include "src/base/enum-set.h"
 #include "src/execution/isolate.h"
-#include "src/utils/utils.h"
 
 namespace v8 {
 namespace internal {
 
 namespace {
 
-template <PerThreadAssertType kType>
-using PerThreadDataBit = base::BitField<bool, kType, 1>;
-template <PerIsolateAssertType kType>
-using PerIsolateDataBit = base::BitField<bool, kType, 1>;
+// All asserts are allowed by default except for one, and the cleared bit is not
+// set.
+constexpr PerThreadAsserts kInitialValue =
+    ~PerThreadAsserts{HANDLE_USAGE_ON_ALL_THREADS_ASSERT};
+static_assert(kInitialValue.contains(ASSERT_TYPE_IS_VALID_MARKER));
 
-// Thread-local storage for assert data. Default all asserts to "allow".
-thread_local uint32_t current_per_thread_assert_data(~0);
+// The cleared value is the only one where ASSERT_TYPE_IS_VALID_MARKER is not
+// set.
+constexpr PerThreadAsserts kClearedValue = PerThreadAsserts{};
+static_assert(!kClearedValue.contains(ASSERT_TYPE_IS_VALID_MARKER));
+
+// Thread-local storage for assert data.
+thread_local PerThreadAsserts current_per_thread_assert_data(kInitialValue);
 
 }  // namespace
 
-template <PerThreadAssertType kType, bool kAllow>
-PerThreadAssertScope<kType, kAllow>::PerThreadAssertScope()
+template <bool kAllow, PerThreadAssertType... kTypes>
+PerThreadAssertScope<kAllow, kTypes...>::PerThreadAssertScope()
     : old_data_(current_per_thread_assert_data) {
-  current_per_thread_assert_data =
-      PerThreadDataBit<kType>::update(old_data_.value(), kAllow);
+  static_assert(((kTypes != ASSERT_TYPE_IS_VALID_MARKER) && ...),
+                "PerThreadAssertScope types should not include the "
+                "ASSERT_TYPE_IS_VALID_MARKER");
+  DCHECK(old_data_.contains(ASSERT_TYPE_IS_VALID_MARKER));
+  if (kAllow) {
+    current_per_thread_assert_data = old_data_ | PerThreadAsserts({kTypes...});
+  } else {
+    current_per_thread_assert_data = old_data_ - PerThreadAsserts({kTypes...});
+  }
 }
 
-template <PerThreadAssertType kType, bool kAllow>
-PerThreadAssertScope<kType, kAllow>::~PerThreadAssertScope() {
-  if (!old_data_.has_value()) return;
+template <bool kAllow, PerThreadAssertType... kTypes>
+PerThreadAssertScope<kAllow, kTypes...>::~PerThreadAssertScope() {
   Release();
 }
 
-template <PerThreadAssertType kType, bool kAllow>
-void PerThreadAssertScope<kType, kAllow>::Release() {
-  current_per_thread_assert_data = old_data_.value();
-  old_data_.reset();
+template <bool kAllow, PerThreadAssertType... kTypes>
+void PerThreadAssertScope<kAllow, kTypes...>::Release() {
+  if (old_data_ == kClearedValue) return;
+  current_per_thread_assert_data = old_data_;
+  old_data_ = kClearedValue;
 }
 
 // static
-template <PerThreadAssertType kType, bool kAllow>
-bool PerThreadAssertScope<kType, kAllow>::IsAllowed() {
-  return PerThreadDataBit<kType>::decode(current_per_thread_assert_data);
+template <bool kAllow, PerThreadAssertType... kTypes>
+bool PerThreadAssertScope<kAllow, kTypes...>::IsAllowed() {
+  return current_per_thread_assert_data.contains_all({kTypes...});
 }
 
-template <PerIsolateAssertType kType, bool kAllow>
-PerIsolateAssertScope<kType, kAllow>::PerIsolateAssertScope(Isolate* isolate)
-    : isolate_(isolate), old_data_(isolate->per_isolate_assert_data()) {
-  DCHECK_NOT_NULL(isolate);
-  isolate_->set_per_isolate_assert_data(
-      PerIsolateDataBit<kType>::update(old_data_, kAllow));
-}
+#define PER_ISOLATE_ASSERT_SCOPE_DEFINITION(ScopeType, field, enable)      \
+  ScopeType::ScopeType(Isolate* isolate)                                   \
+      : isolate_(isolate), old_data_(isolate->field()) {                   \
+    DCHECK_NOT_NULL(isolate);                                              \
+    isolate_->set_##field(enable);                                         \
+  }                                                                        \
+                                                                           \
+  ScopeType::~ScopeType() { isolate_->set_##field(old_data_); }            \
+                                                                           \
+  /* static */                                                             \
+  bool ScopeType::IsAllowed(Isolate* isolate) { return isolate->field(); } \
+                                                                           \
+  /* static */                                                             \
+  void ScopeType::Open(Isolate* isolate, bool* was_execution_allowed) {    \
+    DCHECK_NOT_NULL(isolate);                                              \
+    DCHECK_NOT_NULL(was_execution_allowed);                                \
+    *was_execution_allowed = isolate->field();                             \
+    isolate->set_##field(enable);                                          \
+  }                                                                        \
+  /* static */                                                             \
+  void ScopeType::Close(Isolate* isolate, bool was_execution_allowed) {    \
+    DCHECK_NOT_NULL(isolate);                                              \
+    isolate->set_##field(was_execution_allowed);                           \
+  }
 
-template <PerIsolateAssertType kType, bool kAllow>
-PerIsolateAssertScope<kType, kAllow>::~PerIsolateAssertScope() {
-  isolate_->set_per_isolate_assert_data(old_data_);
-}
+#define PER_ISOLATE_ASSERT_ENABLE_SCOPE_DEFINITION(EnableType, _, field, \
+                                                   enable)               \
+  PER_ISOLATE_ASSERT_SCOPE_DEFINITION(EnableType, field, enable)
 
-// static
-template <PerIsolateAssertType kType, bool kAllow>
-bool PerIsolateAssertScope<kType, kAllow>::IsAllowed(Isolate* isolate) {
-  return PerIsolateDataBit<kType>::decode(isolate->per_isolate_assert_data());
-}
+#define PER_ISOLATE_ASSERT_DISABLE_SCOPE_DEFINITION(_, DisableType, field, \
+                                                    enable)                \
+  PER_ISOLATE_ASSERT_SCOPE_DEFINITION(DisableType, field, enable)
 
-// static
-template <PerIsolateAssertType kType, bool kAllow>
-void PerIsolateAssertScope<kType, kAllow>::Open(Isolate* isolate,
-                                                bool* was_execution_allowed) {
-  DCHECK_NOT_NULL(isolate);
-  DCHECK_NOT_NULL(was_execution_allowed);
-  uint32_t old_data = isolate->per_isolate_assert_data();
-  *was_execution_allowed = PerIsolateDataBit<kType>::decode(old_data);
-  isolate->set_per_isolate_assert_data(
-      PerIsolateDataBit<kType>::update(old_data, kAllow));
-}
-// static
-template <PerIsolateAssertType kType, bool kAllow>
-void PerIsolateAssertScope<kType, kAllow>::Close(Isolate* isolate,
-                                                 bool was_execution_allowed) {
-  DCHECK_NOT_NULL(isolate);
-  uint32_t old_data = isolate->per_isolate_assert_data();
-  isolate->set_per_isolate_assert_data(
-      PerIsolateDataBit<kType>::update(old_data, was_execution_allowed));
-}
+PER_ISOLATE_DCHECK_TYPE(PER_ISOLATE_ASSERT_ENABLE_SCOPE_DEFINITION, true)
+PER_ISOLATE_CHECK_TYPE(PER_ISOLATE_ASSERT_ENABLE_SCOPE_DEFINITION, true)
+PER_ISOLATE_DCHECK_TYPE(PER_ISOLATE_ASSERT_DISABLE_SCOPE_DEFINITION, false)
+PER_ISOLATE_CHECK_TYPE(PER_ISOLATE_ASSERT_DISABLE_SCOPE_DEFINITION, false)
 
 // -----------------------------------------------------------------------------
 // Instantiations.
 
-template class PerThreadAssertScope<HEAP_ALLOCATION_ASSERT, false>;
-template class PerThreadAssertScope<HEAP_ALLOCATION_ASSERT, true>;
-template class PerThreadAssertScope<SAFEPOINTS_ASSERT, false>;
-template class PerThreadAssertScope<SAFEPOINTS_ASSERT, true>;
-template class PerThreadAssertScope<HANDLE_ALLOCATION_ASSERT, false>;
-template class PerThreadAssertScope<HANDLE_ALLOCATION_ASSERT, true>;
-template class PerThreadAssertScope<HANDLE_DEREFERENCE_ASSERT, false>;
-template class PerThreadAssertScope<HANDLE_DEREFERENCE_ASSERT, true>;
-template class PerThreadAssertScope<CODE_DEPENDENCY_CHANGE_ASSERT, false>;
-template class PerThreadAssertScope<CODE_DEPENDENCY_CHANGE_ASSERT, true>;
-template class PerThreadAssertScope<CODE_ALLOCATION_ASSERT, false>;
-template class PerThreadAssertScope<CODE_ALLOCATION_ASSERT, true>;
-template class PerThreadAssertScope<GC_MOLE, false>;
+template class PerThreadAssertScope<false, HEAP_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<true, HEAP_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<false, SAFEPOINTS_ASSERT>;
+template class PerThreadAssertScope<true, SAFEPOINTS_ASSERT>;
+template class PerThreadAssertScope<false, HANDLE_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<true, HANDLE_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<false, HANDLE_DEREFERENCE_ASSERT>;
+template class PerThreadAssertScope<true, HANDLE_DEREFERENCE_ASSERT>;
+template class PerThreadAssertScope<true, HANDLE_USAGE_ON_ALL_THREADS_ASSERT>;
+template class PerThreadAssertScope<false, CODE_DEPENDENCY_CHANGE_ASSERT>;
+template class PerThreadAssertScope<true, CODE_DEPENDENCY_CHANGE_ASSERT>;
+template class PerThreadAssertScope<false, CODE_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<true, CODE_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<false, GC_MOLE>;
+template class PerThreadAssertScope<false, POSITION_INFO_SLOW_ASSERT>;
+template class PerThreadAssertScope<true, POSITION_INFO_SLOW_ASSERT>;
+template class PerThreadAssertScope<false, SAFEPOINTS_ASSERT,
+                                    HEAP_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<true, SAFEPOINTS_ASSERT,
+                                    HEAP_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<
+    false, CODE_DEPENDENCY_CHANGE_ASSERT, HANDLE_DEREFERENCE_ASSERT,
+    HANDLE_ALLOCATION_ASSERT, HEAP_ALLOCATION_ASSERT>;
+template class PerThreadAssertScope<
+    true, CODE_DEPENDENCY_CHANGE_ASSERT, HANDLE_DEREFERENCE_ASSERT,
+    HANDLE_ALLOCATION_ASSERT, HEAP_ALLOCATION_ASSERT>;
 
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_ASSERT, false>;
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_ASSERT, true>;
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_THROWS, false>;
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_THROWS, true>;
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_DUMP, false>;
-template class PerIsolateAssertScope<JAVASCRIPT_EXECUTION_DUMP, true>;
-template class PerIsolateAssertScope<DEOPTIMIZATION_ASSERT, false>;
-template class PerIsolateAssertScope<DEOPTIMIZATION_ASSERT, true>;
-template class PerIsolateAssertScope<COMPILATION_ASSERT, false>;
-template class PerIsolateAssertScope<COMPILATION_ASSERT, true>;
-template class PerIsolateAssertScope<NO_EXCEPTION_ASSERT, false>;
-template class PerIsolateAssertScope<NO_EXCEPTION_ASSERT, true>;
+static_assert(Internals::kDisallowGarbageCollectionAlign ==
+              alignof(DisallowGarbageCollectionInRelease));
+static_assert(Internals::kDisallowGarbageCollectionSize ==
+              sizeof(DisallowGarbageCollectionInRelease));
 
 }  // namespace internal
 }  // namespace v8

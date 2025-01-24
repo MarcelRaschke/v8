@@ -13,6 +13,9 @@ const path = require('path');
 
 const common = require('./mutators/common.js');
 const db = require('./db.js');
+const exceptions = require('./exceptions.js');
+const random = require('./random.js');
+const runner = require('./runner.js');
 const sourceHelpers = require('./source_helpers.js');
 
 const { AddTryCatchMutator } = require('./mutators/try_catch.js');
@@ -26,6 +29,8 @@ const { ObjectMutator } = require('./mutators/object_mutator.js');
 const { VariableMutator } = require('./mutators/variable_mutator.js');
 const { VariableOrObjectMutator } = require('./mutators/variable_or_object_mutation.js');
 
+const MAX_EXTRA_MUTATIONS = 5;
+
 function defaultSettings() {
   return {
     ADD_VAR_OR_OBJ_MUTATIONS: 0.1,
@@ -38,6 +43,8 @@ function defaultSettings() {
     MUTATE_NUMBERS: 0.05,
     MUTATE_OBJECTS: 0.1,
     MUTATE_VARIABLES: 0.075,
+    SCRIPT_MUTATOR_EXTRA_MUTATIONS: 0.2,
+    SCRIPT_MUTATOR_SHUFFLE: 0.2,
   };
 }
 
@@ -61,8 +68,19 @@ class ScriptMutator {
       new ExpressionMutator(settings),
       new FunctionCallMutator(settings),
       new VariableOrObjectMutator(settings),
-      new AddTryCatchMutator(settings),
     ];
+    this.trycatch = new AddTryCatchMutator(settings);
+    this.settings = settings;
+  }
+
+  /**
+   * Returns a runner class that decides the composition of tests from
+   * different corpora.
+   */
+  get runnerClass() {
+    // Choose a setup with the Fuzzilli corpus with a 50% chance.
+    return random.single(
+        [runner.RandomCorpusRunner, runner.RandomCorpusRunnerWithFuzzilli]);
   }
 
   _addMjsunitIfNeeded(dependencies, input) {
@@ -84,7 +102,7 @@ class ScriptMutator {
     if (path.basename(mjsunitPath) == 'mjsunit') {
       mjsunitPath = path.join(mjsunitPath, 'mjsunit.js');
       dependencies.set('mjsunit', sourceHelpers.loadDependencyAbs(
-          input.baseDir, mjsunitPath));
+          input.corpus, mjsunitPath));
       return;
     }
 
@@ -113,7 +131,7 @@ class ScriptMutator {
     for (let i = shellJsPaths.length - 1; i >= 0; i--) {
       if (!dependencies.has(shellJsPaths[i])) {
         const dependency = sourceHelpers.loadDependencyAbs(
-            input.baseDir, shellJsPaths[i]);
+            input.corpus, shellJsPaths[i]);
         dependencies.set(shellJsPaths[i], dependency);
       }
     }
@@ -129,8 +147,30 @@ class ScriptMutator {
   }
 
   mutate(source) {
-    for (const mutator of this.mutators) {
+    let mutators = this.mutators.slice();
+    let annotations = [];
+    if (random.choose(this.settings.SCRIPT_MUTATOR_SHUFFLE)){
+      annotations.push(' Script mutator: using shuffled mutators');
+      random.shuffle(mutators);
+    }
+
+    if (random.choose(this.settings.SCRIPT_MUTATOR_EXTRA_MUTATIONS)){
+      for (let i = random.randInt(1, MAX_EXTRA_MUTATIONS); i > 0; i--) {
+        let mutator = random.single(this.mutators);
+        mutators.push(mutator);
+        annotations.push(` Script mutator: extra ${mutator.constructor.name}`);
+      }
+    }
+
+    // Try-catch wrapping should always be the last mutation.
+    mutators.push(this.trycatch);
+
+    for (const mutator of mutators) {
       mutator.mutate(source);
+    }
+
+    for (const annotation of annotations.reverse()) {
+      sourceHelpers.annotateWithComment(source.ast, annotation);
     }
   }
 
@@ -214,7 +254,8 @@ class ScriptMutator {
     const dependencies = this.resolveDependencies(inputs);
     const combinedSource = this.mutateInputs(inputs);
     const code = sourceHelpers.generateCode(combinedSource, dependencies);
-    const flags = common.concatFlags(dependencies.concat([combinedSource]));
+    const flags = exceptions.resolveContradictoryFlags(
+        common.concatFlags(dependencies.concat([combinedSource])));
     return new Result(code, flags);
   }
 }

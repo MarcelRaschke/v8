@@ -13,8 +13,9 @@
 
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
+#include "src/base/overflowing-math.h"
+#include "src/base/platform/memory.h"
 #include "src/base/platform/platform.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/ppc/constants-ppc.h"
@@ -38,7 +39,7 @@ DEFINE_LAZY_LEAKY_OBJECT_GETTER(Simulator::GlobalMonitor,
 // SScanF not being implemented in a platform independent way through
 // ::v8::internal::OS in the same way as SNPrintF is that the
 // Windows C Run-Time Library does not provide vsscanf.
-#define SScanF sscanf  // NOLINT
+#define SScanF sscanf
 
 // The PPCDebugger class is used by the simulator while debugging simulated
 // PowerPC code.
@@ -92,16 +93,12 @@ bool PPCDebugger::GetValue(const char* desc, intptr_t* value) {
   if (regnum != kNoRegister) {
     *value = GetRegisterValue(regnum);
     return true;
-  } else {
-    if (strncmp(desc, "0x", 2) == 0) {
-      return SScanF(desc + 2, "%" V8PRIxPTR,
-                    reinterpret_cast<uintptr_t*>(value)) == 1;
-    } else {
-      return SScanF(desc, "%" V8PRIuPTR, reinterpret_cast<uintptr_t*>(value)) ==
-             1;
-    }
   }
-  return false;
+  if (strncmp(desc, "0x", 2) == 0) {
+    return SScanF(desc + 2, "%" V8PRIxPTR,
+                  reinterpret_cast<uintptr_t*>(value)) == 1;
+  }
+  return SScanF(desc, "%" V8PRIuPTR, reinterpret_cast<uintptr_t*>(value)) == 1;
 }
 
 bool PPCDebugger::GetFPDoubleValue(const char* desc, double* value) {
@@ -132,7 +129,8 @@ namespace {
 // (simulator) builds.
 void SetInstructionBitsInCodeSpace(Instruction* instr, Instr value,
                                    Heap* heap) {
-  CodeSpaceMemoryModificationScope scope(heap);
+  CodePageMemoryModificationScopeForDebugging scope(
+      MemoryChunkMetadata::FromAddress(reinterpret_cast<Address>(instr)));
   instr->SetInstructionBits(value);
 }
 }  // namespace
@@ -158,6 +156,10 @@ void PPCDebugger::RedoBreakpoint() {
 }
 
 void PPCDebugger::Debug() {
+  if (v8_flags.correctness_fuzzer_suppressions) {
+    PrintF("Debugger disabled for differential fuzzing.\n");
+    return;
+  }
   intptr_t last_pc = -1;
   bool done = false;
 
@@ -181,16 +183,17 @@ void PPCDebugger::Debug() {
   // to all commands.
   UndoBreakpoint();
   // Disable tracing while simulating
-  bool trace = ::v8::internal::FLAG_trace_sim;
-  ::v8::internal::FLAG_trace_sim = false;
+  bool trace = v8_flags.trace_sim;
+  v8_flags.trace_sim = false;
 
   while (!done && !sim_->has_bad_pc()) {
     if (last_pc != sim_->get_pc()) {
       disasm::NameConverter converter;
       disasm::Disassembler dasm(converter);
       // use a reasonably large buffer
-      v8::internal::EmbeddedVector<char, 256> buffer;
-      dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(sim_->get_pc()));
+      v8::base::EmbeddedVector<char, 256> buffer;
+      dasm.InstructionDecode(buffer,
+                             reinterpret_cast<uint8_t*>(sim_->get_pc()));
       PrintF("  0x%08" V8PRIxPTR "  %s\n", sim_->get_pc(), buffer.begin());
       last_pc = sim_->get_pc();
     }
@@ -229,9 +232,9 @@ void PPCDebugger::Debug() {
             disasm::NameConverter converter;
             disasm::Disassembler dasm(converter);
             // use a reasonably large buffer
-            v8::internal::EmbeddedVector<char, 256> buffer;
+            v8::base::EmbeddedVector<char, 256> buffer;
             dasm.InstructionDecode(buffer,
-                                   reinterpret_cast<byte*>(sim_->get_pc()));
+                                   reinterpret_cast<uint8_t*>(sim_->get_pc()));
             PrintF("  0x%08" V8PRIxPTR "  %s\n", sim_->get_pc(),
                    buffer.begin());
             sim_->ExecuteInstruction(
@@ -295,7 +298,7 @@ void PPCDebugger::Debug() {
           } else if (strcmp(arg1, "allf") == 0) {
             for (int i = 0; i < DoubleRegister::kNumRegisters; i++) {
               dvalue = GetFPDoubleRegisterValue(i);
-              uint64_t as_words = bit_cast<uint64_t>(dvalue);
+              uint64_t as_words = base::bit_cast<uint64_t>(dvalue);
               PrintF("%3s: %f 0x%08x %08x\n",
                      RegisterName(DoubleRegister::from_code(i)), dvalue,
                      static_cast<uint32_t>(as_words >> 32),
@@ -318,7 +321,7 @@ void PPCDebugger::Debug() {
               PrintF("%s: 0x%08" V8PRIxPTR " %" V8PRIdPTR "\n", arg1, value,
                      value);
             } else if (GetFPDoubleValue(arg1, &dvalue)) {
-              uint64_t as_words = bit_cast<uint64_t>(dvalue);
+              uint64_t as_words = base::bit_cast<uint64_t>(dvalue);
               PrintF("%s: %f 0x%08x %08x\n", arg1, dvalue,
                      static_cast<uint32_t>(as_words >> 32),
                      static_cast<uint32_t>(as_words & 0xFFFFFFFF));
@@ -335,10 +338,10 @@ void PPCDebugger::Debug() {
           intptr_t value;
           StdoutStream os;
           if (GetValue(arg1, &value)) {
-            Object obj(value);
+            Tagged<Object> obj(value);
             os << arg1 << ": \n";
 #ifdef DEBUG
-            obj.Print(os);
+            Print(obj, os);
             os << "\n";
 #else
             os << Brief(obj) << "\n";
@@ -389,16 +392,16 @@ void PPCDebugger::Debug() {
         while (cur < end) {
           PrintF("  0x%08" V8PRIxPTR ":  0x%08" V8PRIxPTR " %10" V8PRIdPTR,
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
-          Object obj(*cur);
+          Tagged<Object> obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
           if (!skip_obj_print) {
-            if (obj.IsSmi() ||
-                IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
+            if (IsSmi(obj) ||
+                IsValidHeapObject(current_heap, Cast<HeapObject>(obj))) {
               PrintF(" (");
-              if (obj.IsSmi()) {
+              if (IsSmi(obj)) {
                 PrintF("smi %d", Smi::ToInt(obj));
               } else {
-                obj.ShortPrint();
+                ShortPrint(obj);
               }
               PrintF(")");
             }
@@ -410,14 +413,14 @@ void PPCDebugger::Debug() {
         disasm::NameConverter converter;
         disasm::Disassembler dasm(converter);
         // use a reasonably large buffer
-        v8::internal::EmbeddedVector<char, 256> buffer;
+        v8::base::EmbeddedVector<char, 256> buffer;
 
-        byte* prev = nullptr;
-        byte* cur = nullptr;
-        byte* end = nullptr;
+        uint8_t* prev = nullptr;
+        uint8_t* cur = nullptr;
+        uint8_t* end = nullptr;
 
         if (argc == 1) {
-          cur = reinterpret_cast<byte*>(sim_->get_pc());
+          cur = reinterpret_cast<uint8_t*>(sim_->get_pc());
           end = cur + (10 * kInstrSize);
         } else if (argc == 2) {
           int regnum = Registers::Number(arg1);
@@ -425,7 +428,7 @@ void PPCDebugger::Debug() {
             // The argument is an address or a register name.
             intptr_t value;
             if (GetValue(arg1, &value)) {
-              cur = reinterpret_cast<byte*>(value);
+              cur = reinterpret_cast<uint8_t*>(value);
               // Disassemble 10 instructions at <arg1>.
               end = cur + (10 * kInstrSize);
             }
@@ -433,7 +436,7 @@ void PPCDebugger::Debug() {
             // The argument is the number of instructions.
             intptr_t value;
             if (GetValue(arg1, &value)) {
-              cur = reinterpret_cast<byte*>(sim_->get_pc());
+              cur = reinterpret_cast<uint8_t*>(sim_->get_pc());
               // Disassemble <arg1> instructions.
               end = cur + (value * kInstrSize);
             }
@@ -442,7 +445,7 @@ void PPCDebugger::Debug() {
           intptr_t value1;
           intptr_t value2;
           if (GetValue(arg1, &value1) && GetValue(arg2, &value2)) {
-            cur = reinterpret_cast<byte*>(value1);
+            cur = reinterpret_cast<uint8_t*>(value1);
             end = cur + (value2 * kInstrSize);
           }
         }
@@ -537,9 +540,9 @@ void PPCDebugger::Debug() {
           PrintF("Wrong usage. Use help command for more information.\n");
         }
       } else if ((strcmp(cmd, "t") == 0) || strcmp(cmd, "trace") == 0) {
-        ::v8::internal::FLAG_trace_sim = !::v8::internal::FLAG_trace_sim;
+        sim_->ToggleInstructionTracing();
         PrintF("Trace of executed instructions is %s\n",
-               ::v8::internal::FLAG_trace_sim ? "on" : "off");
+               sim_->InstructionTracingEnabled() ? "on" : "off");
       } else if ((strcmp(cmd, "h") == 0) || (strcmp(cmd, "help") == 0)) {
         PrintF("cont\n");
         PrintF("  continue execution (alias 'c')\n");
@@ -620,13 +623,19 @@ void PPCDebugger::Debug() {
   // hit.
   RedoBreakpoint();
   // Restore tracing
-  ::v8::internal::FLAG_trace_sim = trace;
+  v8_flags.trace_sim = trace;
 
 #undef COMMAND_SIZE
 #undef ARG_SIZE
 
 #undef STR
 #undef XSTR
+}
+
+bool Simulator::InstructionTracingEnabled() { return instruction_tracing_; }
+
+void Simulator::ToggleInstructionTracing() {
+  instruction_tracing_ = !instruction_tracing_;
 }
 
 bool Simulator::ICacheMatch(void* one, void* two) {
@@ -643,6 +652,18 @@ static bool AllOnOnePage(uintptr_t start, int size) {
   intptr_t start_page = (start & ~CachePage::kPageMask);
   intptr_t end_page = ((start + size) & ~CachePage::kPageMask);
   return start_page == end_page;
+}
+
+static bool is_snan(float input) {
+  uint32_t kQuietNanFPBit = 1 << 22;
+  uint32_t InputAsUint = base::bit_cast<uint32_t>(input);
+  return isnan(input) && ((InputAsUint & kQuietNanFPBit) == 0);
+}
+
+static bool is_snan(double input) {
+  uint64_t kQuietNanDPBit = 1L << 51;
+  uint64_t InputAsUint = base::bit_cast<uint64_t>(input);
+  return isnan(input) && ((InputAsUint & kQuietNanDPBit) == 0);
 }
 
 void Simulator::set_last_debugger_input(char* input) {
@@ -715,7 +736,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
                        cache_page->CachedData(offset), kInstrSize));
   } else {
     // Cache miss.  Load memory into the cache.
-    base::Memcpy(cached_line, line, CachePage::kLineLength);
+    memcpy(cached_line, line, CachePage::kLineLength);
     *cache_valid_byte = CachePage::LINE_VALID;
   }
 }
@@ -723,13 +744,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
 Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
 // Set up simulator support first. Some of this information is needed to
 // setup the architecture state.
-#if V8_TARGET_ARCH_PPC64
-  size_t stack_size = FLAG_sim_stack_size * KB;
-#else
-  size_t stack_size = MB;  // allocate 1MB for stack
-#endif
-  stack_size += 2 * stack_protection_size_;
-  stack_ = reinterpret_cast<char*>(base::Malloc(stack_size));
+  stack_ = reinterpret_cast<uint8_t*>(base::Malloc(AllocatedStackSize()));
   pc_modified_ = false;
   icount_ = 0;
   break_pc_ = nullptr;
@@ -754,8 +769,7 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // The sp is initialized to point to the bottom (high address) of the
   // allocated stack area. To be safe in potential stack underflows we leave
   // some buffer below.
-  registers_[sp] =
-      reinterpret_cast<intptr_t>(stack_) + stack_size - stack_protection_size_;
+  registers_[sp] = reinterpret_cast<intptr_t>(stack_) + UsableStackSize();
 
   last_debugger_input_ = nullptr;
 }
@@ -797,13 +811,6 @@ double Simulator::get_double_from_register_pair(int reg) {
   DCHECK((reg >= 0) && (reg < kNumGPRs) && ((reg % 2) == 0));
 
   double dm_val = 0.0;
-#if !V8_TARGET_ARCH_PPC64  // doesn't make sense in 64bit mode
-  // Read the bits from the unsigned integer register_[] array
-  // into the double precision floating point value and return it.
-  char buffer[sizeof(fp_registers_[0])];
-  base::Memcpy(buffer, &registers_[reg], 2 * sizeof(registers_[0]));
-  base::Memcpy(&dm_val, buffer, 2 * sizeof(registers_[0]));
-#endif
   return (dm_val);
 }
 
@@ -878,7 +885,14 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
 
   // Otherwise the limit is the JS stack. Leave a safety margin to prevent
   // overrunning the stack when pushing values.
-  return reinterpret_cast<uintptr_t>(stack_) + stack_protection_size_;
+  return reinterpret_cast<uintptr_t>(stack_) + kStackProtectionSize;
+}
+
+base::Vector<uint8_t> Simulator::GetCentralStackView() const {
+  // We do not add an additional safety margin as above in
+  // Simulator::StackLimit, as this is currently only used in wasm::StackMemory,
+  // which adds its own margin.
+  return base::VectorOf(stack_, UsableStackSize());
 }
 
 // Unsupported instructions use Format to print an error and stop execution.
@@ -930,32 +944,36 @@ static void decodeObjectPair(ObjectPair* pair, intptr_t* x, intptr_t* y) {
 }
 
 // Calls into the V8 runtime.
-using SimulatorRuntimeCall = intptr_t (*)(intptr_t arg0, intptr_t arg1,
-                                          intptr_t arg2, intptr_t arg3,
-                                          intptr_t arg4, intptr_t arg5,
-                                          intptr_t arg6, intptr_t arg7,
-                                          intptr_t arg8, intptr_t arg9);
-using SimulatorRuntimePairCall = ObjectPair (*)(intptr_t arg0, intptr_t arg1,
-                                                intptr_t arg2, intptr_t arg3,
-                                                intptr_t arg4, intptr_t arg5,
-                                                intptr_t arg6, intptr_t arg7,
-                                                intptr_t arg8, intptr_t arg9);
+using SimulatorRuntimeCall = intptr_t (*)(
+    intptr_t arg0, intptr_t arg1, intptr_t arg2, intptr_t arg3, intptr_t arg4,
+    intptr_t arg5, intptr_t arg6, intptr_t arg7, intptr_t arg8, intptr_t arg9,
+    intptr_t arg10, intptr_t arg11, intptr_t arg12, intptr_t arg13,
+    intptr_t arg14, intptr_t arg15, intptr_t arg16, intptr_t arg17,
+    intptr_t arg18, intptr_t arg19);
+using SimulatorRuntimePairCall = ObjectPair (*)(
+    intptr_t arg0, intptr_t arg1, intptr_t arg2, intptr_t arg3, intptr_t arg4,
+    intptr_t arg5, intptr_t arg6, intptr_t arg7, intptr_t arg8, intptr_t arg9,
+    intptr_t arg10, intptr_t arg11, intptr_t arg12, intptr_t arg13,
+    intptr_t arg14, intptr_t arg15, intptr_t arg16, intptr_t arg17,
+    intptr_t arg18, intptr_t arg19);
 
 // These prototypes handle the four types of FP calls.
 using SimulatorRuntimeCompareCall = int (*)(double darg0, double darg1);
 using SimulatorRuntimeFPFPCall = double (*)(double darg0, double darg1);
 using SimulatorRuntimeFPCall = double (*)(double darg0);
 using SimulatorRuntimeFPIntCall = double (*)(double darg0, intptr_t arg0);
+using SimulatorRuntimeIntFPCall = int32_t (*)(double darg0);
+// Define four args for future flexibility; at the time of this writing only
+// one is ever used.
+using SimulatorRuntimeFPTaggedCall = double (*)(int32_t arg0, int32_t arg1,
+                                                int32_t arg2, int32_t arg3);
 
 // This signature supports direct call in to API function native callback
 // (refer to InvocationCallback in v8.h).
 using SimulatorRuntimeDirectApiCall = void (*)(intptr_t arg0);
-using SimulatorRuntimeProfilingApiCall = void (*)(intptr_t arg0, void* arg1);
 
 // This signature supports direct call to accessor getter callback.
 using SimulatorRuntimeDirectGetterCall = void (*)(intptr_t arg0, intptr_t arg1);
-using SimulatorRuntimeProfilingGetterCall = void (*)(intptr_t arg0,
-                                                     intptr_t arg1, void* arg2);
 
 // Software interrupt instructions are used by the simulator to call into the
 // C-based V8 runtime.
@@ -966,10 +984,9 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
       // Check if stack is aligned. Error if not aligned is reported below to
       // include information on the function called.
       bool stack_aligned =
-          (get_register(sp) & (::v8::internal::FLAG_sim_stack_alignment - 1)) ==
-          0;
+          (get_register(sp) & (v8_flags.sim_stack_alignment - 1)) == 0;
       Redirection* redirection = Redirection::FromInstruction(instr);
-      const int kArgCount = 10;
+      const int kArgCount = 20;
       const int kRegisterArgCount = 8;
       int arg0_regnum = 3;
       intptr_t result_buffer = 0;
@@ -990,13 +1007,14 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
       for (int i = kRegisterArgCount, j = 0; i < kArgCount; i++, j++) {
         arg[i] = stack_pointer[kStackFrameExtraParamSlot + j];
       }
-      STATIC_ASSERT(kArgCount == kRegisterArgCount + 2);
-      STATIC_ASSERT(kMaxCParameters == kArgCount);
+      static_assert(kArgCount == kRegisterArgCount + 12);
+      static_assert(kMaxCParameters == kArgCount);
       bool fp_call =
           (redirection->type() == ExternalReference::BUILTIN_FP_FP_CALL) ||
           (redirection->type() == ExternalReference::BUILTIN_COMPARE_CALL) ||
           (redirection->type() == ExternalReference::BUILTIN_FP_CALL) ||
-          (redirection->type() == ExternalReference::BUILTIN_FP_INT_CALL);
+          (redirection->type() == ExternalReference::BUILTIN_FP_INT_CALL) ||
+          (redirection->type() == ExternalReference::BUILTIN_INT_FP_CALL);
       // This is dodgy but it works because the C entry stubs are never moved.
       // See comment in codegen-arm.cc and bug 1242173.
       intptr_t saved_lr = special_reg_lr_;
@@ -1008,7 +1026,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         int iresult = 0;      // integer return value
         double dresult = 0;   // double return value
         GetFpArgs(&dval0, &dval1, &ival);
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           SimulatorRuntimeCall generic_target =
               reinterpret_cast<SimulatorRuntimeCall>(external);
           switch (redirection->type()) {
@@ -1028,9 +1046,13 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
                      reinterpret_cast<void*>(FUNCTION_ADDR(generic_target)),
                      dval0, ival);
               break;
+            case ExternalReference::BUILTIN_INT_FP_CALL:
+              PrintF("Call to host function at %p with args %f",
+                     reinterpret_cast<void*>(FUNCTION_ADDR(generic_target)),
+                     dval0);
+              break;
             default:
               UNREACHABLE();
-              break;
           }
           if (!stack_aligned) {
             PrintF(" with unaligned stack %08" V8PRIxPTR "\n",
@@ -1068,13 +1090,23 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
             SetFpResult(dresult);
             break;
           }
+          case ExternalReference::BUILTIN_INT_FP_CALL: {
+            SimulatorRuntimeIntFPCall target =
+                reinterpret_cast<SimulatorRuntimeIntFPCall>(external);
+            iresult = target(dval0);
+#ifdef DEBUG
+            TrashCallerSaveRegisters();
+#endif
+            set_register(r0, static_cast<int32_t>(iresult));
+            break;
+          }
           default:
             UNREACHABLE();
-            break;
         }
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled()) {
           switch (redirection->type()) {
             case ExternalReference::BUILTIN_COMPARE_CALL:
+            case ExternalReference::BUILTIN_INT_FP_CALL:
               PrintF("Returned %08x\n", iresult);
               break;
             case ExternalReference::BUILTIN_FP_FP_CALL:
@@ -1084,13 +1116,35 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
               break;
             default:
               UNREACHABLE();
-              break;
           }
+        }
+      } else if (redirection->type() ==
+                 ExternalReference::BUILTIN_FP_POINTER_CALL) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
+          PrintF("Call to host function at %p args %08" V8PRIxPTR,
+                 reinterpret_cast<void*>(external), arg[0]);
+          if (!stack_aligned) {
+            PrintF(" with unaligned stack %08" V8PRIxPTR "\n",
+                   get_register(sp));
+          }
+          PrintF("\n");
+        }
+        CHECK(stack_aligned);
+        SimulatorRuntimeFPTaggedCall target =
+            reinterpret_cast<SimulatorRuntimeFPTaggedCall>(external);
+        double dresult = target(arg[0], arg[1], arg[2], arg[3]);
+#ifdef DEBUG
+        TrashCallerSaveRegisters();
+#endif
+        SetFpResult(dresult);
+        if (InstructionTracingEnabled()) {
+          PrintF("Returned %f\n", dresult);
         }
       } else if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
         // See callers of MacroAssembler::CallApiFunctionAndReturn for
         // explanation of register usage.
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+        // void f(v8::FunctionCallbackInfo&)
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF("Call to host function at %p args %08" V8PRIxPTR,
                  reinterpret_cast<void*>(external), arg[0]);
           if (!stack_aligned) {
@@ -1103,27 +1157,11 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         SimulatorRuntimeDirectApiCall target =
             reinterpret_cast<SimulatorRuntimeDirectApiCall>(external);
         target(arg[0]);
-      } else if (redirection->type() == ExternalReference::PROFILING_API_CALL) {
-        // See callers of MacroAssembler::CallApiFunctionAndReturn for
-        // explanation of register usage.
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
-          PrintF("Call to host function at %p args %08" V8PRIxPTR
-                 " %08" V8PRIxPTR,
-                 reinterpret_cast<void*>(external), arg[0], arg[1]);
-          if (!stack_aligned) {
-            PrintF(" with unaligned stack %08" V8PRIxPTR "\n",
-                   get_register(sp));
-          }
-          PrintF("\n");
-        }
-        CHECK(stack_aligned);
-        SimulatorRuntimeProfilingApiCall target =
-            reinterpret_cast<SimulatorRuntimeProfilingApiCall>(external);
-        target(arg[0], Redirection::ReverseRedirection(arg[1]));
       } else if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
         // See callers of MacroAssembler::CallApiFunctionAndReturn for
         // explanation of register usage.
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+        // void f(v8::Local<String> property, v8::PropertyCallbackInfo& info)
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF("Call to host function at %p args %08" V8PRIxPTR
                  " %08" V8PRIxPTR,
                  reinterpret_cast<void*>(external), arg[0], arg[1]);
@@ -1137,31 +1175,12 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         SimulatorRuntimeDirectGetterCall target =
             reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
         if (!ABI_PASSES_HANDLES_IN_REGS) {
-          arg[0] = *(reinterpret_cast<intptr_t*>(arg[0]));
+          arg[0] = base::bit_cast<intptr_t>(arg[0]);
         }
         target(arg[0], arg[1]);
-      } else if (redirection->type() ==
-                 ExternalReference::PROFILING_GETTER_CALL) {
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
-          PrintF("Call to host function at %p args %08" V8PRIxPTR
-                 " %08" V8PRIxPTR " %08" V8PRIxPTR,
-                 reinterpret_cast<void*>(external), arg[0], arg[1], arg[2]);
-          if (!stack_aligned) {
-            PrintF(" with unaligned stack %08" V8PRIxPTR "\n",
-                   get_register(sp));
-          }
-          PrintF("\n");
-        }
-        CHECK(stack_aligned);
-        SimulatorRuntimeProfilingGetterCall target =
-            reinterpret_cast<SimulatorRuntimeProfilingGetterCall>(external);
-        if (!ABI_PASSES_HANDLES_IN_REGS) {
-          arg[0] = *(reinterpret_cast<intptr_t*>(arg[0]));
-        }
-        target(arg[0], arg[1], Redirection::ReverseRedirection(arg[2]));
       } else {
         // builtin call.
-        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           SimulatorRuntimeCall target =
               reinterpret_cast<SimulatorRuntimeCall>(external);
           PrintF(
@@ -1169,9 +1188,14 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
               "\t\t\t\targs %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
               ", %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
               ", %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
-              ", %08" V8PRIxPTR,
+              ", %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
+              ", %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
+              ", %08" V8PRIxPTR ", %08" V8PRIxPTR ", %08" V8PRIxPTR
+              ", %08" V8PRIxPTR ", %08" V8PRIxPTR,
               reinterpret_cast<void*>(FUNCTION_ADDR(target)), arg[0], arg[1],
-              arg[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8], arg[9]);
+              arg[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8], arg[9],
+              arg[10], arg[11], arg[12], arg[13], arg[14], arg[15], arg[16],
+              arg[17], arg[18], arg[19]);
           if (!stack_aligned) {
             PrintF(" with unaligned stack %08" V8PRIxPTR "\n",
                    get_register(sp));
@@ -1182,29 +1206,44 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         if (redirection->type() == ExternalReference::BUILTIN_CALL_PAIR) {
           SimulatorRuntimePairCall target =
               reinterpret_cast<SimulatorRuntimePairCall>(external);
-          ObjectPair result = target(arg[0], arg[1], arg[2], arg[3], arg[4],
-                                     arg[5], arg[6], arg[7], arg[8], arg[9]);
+          ObjectPair result =
+              target(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6],
+                     arg[7], arg[8], arg[9], arg[10], arg[11], arg[12], arg[13],
+                     arg[14], arg[15], arg[16], arg[17], arg[18], arg[19]);
           intptr_t x;
           intptr_t y;
           decodeObjectPair(&result, &x, &y);
-          if (::v8::internal::FLAG_trace_sim) {
+          if (InstructionTracingEnabled()) {
             PrintF("Returned {%08" V8PRIxPTR ", %08" V8PRIxPTR "}\n", x, y);
           }
           if (ABI_RETURNS_OBJECT_PAIRS_IN_REGS) {
             set_register(r3, x);
             set_register(r4, y);
           } else {
-            base::Memcpy(reinterpret_cast<void*>(result_buffer), &result,
-                         sizeof(ObjectPair));
+            memcpy(reinterpret_cast<void*>(result_buffer), &result,
+                   sizeof(ObjectPair));
             set_register(r3, result_buffer);
           }
         } else {
-          DCHECK(redirection->type() == ExternalReference::BUILTIN_CALL);
+          // FAST_C_CALL is temporarily handled here as well, because we lack
+          // proper support for direct C calls with FP params in the simulator.
+          // The generic BUILTIN_CALL path assumes all parameters are passed in
+          // the GP registers, thus supporting calling the slow callback without
+          // crashing. The reason for that is that in the mjsunit tests we check
+          // the `fast_c_api.supports_fp_params` (which is false on
+          // non-simulator builds for arm/arm64), thus we expect that the slow
+          // path will be called. And since the slow path passes the arguments
+          // as a `const FunctionCallbackInfo<Value>&` (which is a GP argument),
+          // the call is made correctly.
+          DCHECK(redirection->type() == ExternalReference::BUILTIN_CALL ||
+                 redirection->type() == ExternalReference::FAST_C_CALL);
           SimulatorRuntimeCall target =
               reinterpret_cast<SimulatorRuntimeCall>(external);
-          intptr_t result = target(arg[0], arg[1], arg[2], arg[3], arg[4],
-                                   arg[5], arg[6], arg[7], arg[8], arg[9]);
-          if (::v8::internal::FLAG_trace_sim) {
+          intptr_t result =
+              target(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6],
+                     arg[7], arg[8], arg[9], arg[10], arg[11], arg[12], arg[13],
+                     arg[14], arg[15], arg[16], arg[17], arg[18], arg[19]);
+          if (InstructionTracingEnabled()) {
             PrintF("Returned %08" V8PRIxPTR "\n", result);
           }
           set_register(r3, result);
@@ -1326,11 +1365,11 @@ void Simulator::SetCR0(intptr_t result, bool setSO) {
   condition_reg_ = (condition_reg_ & ~0xF0000000) | bf;
 }
 
-void Simulator::SetCR6(bool true_for_all, bool false_for_all) {
+void Simulator::SetCR6(bool true_for_all) {
   int32_t clear_cr6_mask = 0xFFFFFF0F;
   if (true_for_all) {
     condition_reg_ = (condition_reg_ & clear_cr6_mask) | 0x80;
-  } else if (false_for_all) {
+  } else {
     condition_reg_ = (condition_reg_ & clear_cr6_mask) | 0x20;
   }
 }
@@ -1388,6 +1427,9 @@ void Simulator::ExecuteBranchConditional(Instruction* instr, BCType type) {
 }
 
 // Vector instruction helpers.
+#define GET_ADDRESS(a, b, a_val, b_val)          \
+  intptr_t a_val = a == 0 ? 0 : get_register(a); \
+  intptr_t b_val = get_register(b);
 #define DECODE_VX_INSTRUCTION(d, a, b, source_or_target) \
   int d = instr->R##source_or_target##Value();           \
   int a = instr->RAValue();                              \
@@ -1398,14 +1440,13 @@ template <typename A, typename T, typename Operation>
 void VectorCompareOp(Simulator* sim, Instruction* instr, bool is_fp,
                      Operation op) {
   DECODE_VX_INSTRUCTION(t, a, b, T)
-  bool true_for_all = true, false_for_all = true;
+  bool true_for_all = true;
   FOR_EACH_LANE(i, A) {
     A a_val = sim->get_simd_register_by_lane<A>(a, i);
     A b_val = sim->get_simd_register_by_lane<A>(b, i);
     T t_val = 0;
     bool is_not_nan = is_fp ? !isnan(a_val) && !isnan(b_val) : true;
     if (is_not_nan && op(a_val, b_val)) {
-      false_for_all = false;
       t_val = -1;  // Set all bits to 1 indicating true.
     } else {
       true_for_all = false;
@@ -1413,13 +1454,285 @@ void VectorCompareOp(Simulator* sim, Instruction* instr, bool is_fp,
     sim->set_simd_register_by_lane<T>(t, i, t_val);
   }
   if (instr->Bit(10)) {  // RC bit set.
-    sim->SetCR6(true_for_all, false_for_all);
+    sim->SetCR6(true_for_all);
   }
+}
+
+template <typename S, typename T>
+void VectorConverFromFPSaturate(Simulator* sim, Instruction* instr, T min_val,
+                                T max_val, bool even_lane_result = false) {
+  int t = instr->RTValue();
+  int b = instr->RBValue();
+  FOR_EACH_LANE(i, S) {
+    T t_val;
+    double b_val = static_cast<double>(sim->get_simd_register_by_lane<S>(b, i));
+    if (isnan(b_val)) {
+      t_val = min_val;
+    } else {
+      // Round Towards Zero.
+      b_val = std::trunc(b_val);
+      if (b_val < min_val) {
+        t_val = min_val;
+      } else if (b_val > max_val) {
+        t_val = max_val;
+      } else {
+        t_val = static_cast<T>(b_val);
+      }
+    }
+    sim->set_simd_register_by_lane<T>(t, even_lane_result ? 2 * i : i, t_val);
+  }
+}
+
+template <typename S, typename T>
+void VectorPackSaturate(Simulator* sim, Instruction* instr, S min_val,
+                        S max_val) {
+  DECODE_VX_INSTRUCTION(t, a, b, T)
+  int src = a;
+  int count = 0;
+  S value = 0;
+  // Setup a temp array to avoid overwriting dst mid loop.
+  T temps[kSimd128Size / sizeof(T)] = {0};
+  for (size_t i = 0; i < kSimd128Size / sizeof(T); i++, count++) {
+    if (count == kSimd128Size / sizeof(S)) {
+      src = b;
+      count = 0;
+    }
+    value = sim->get_simd_register_by_lane<S>(src, count);
+    if (value > max_val) {
+      value = max_val;
+    } else if (value < min_val) {
+      value = min_val;
+    }
+    temps[i] = static_cast<T>(value);
+  }
+  FOR_EACH_LANE(i, T) { sim->set_simd_register_by_lane<T>(t, i, temps[i]); }
+}
+
+template <typename T>
+T VSXFPMin(T x, T y) {
+  // Handle NaN.
+  // TODO(miladfarca): include the payload of src1.
+  if (std::isnan(x) && std::isnan(y)) return NAN;
+  // Handle +0 and -0.
+  if (std::signbit(x) < std::signbit(y)) return y;
+  if (std::signbit(y) < std::signbit(x)) return x;
+  return std::fmin(x, y);
+}
+
+template <typename T>
+T VSXFPMax(T x, T y) {
+  // Handle NaN.
+  // TODO(miladfarca): include the payload of src1.
+  if (std::isnan(x) && std::isnan(y)) return NAN;
+  // Handle +0 and -0.
+  if (std::signbit(x) < std::signbit(y)) return x;
+  if (std::signbit(y) < std::signbit(x)) return y;
+  return std::fmax(x, y);
+}
+
+float VMXFPMin(float x, float y) {
+  // Handle NaN.
+  if (std::isnan(x) || std::isnan(y)) return NAN;
+  // Handle +0 and -0.
+  if (std::signbit(x) < std::signbit(y)) return y;
+  if (std::signbit(y) < std::signbit(x)) return x;
+  return x < y ? x : y;
+}
+
+float VMXFPMax(float x, float y) {
+  // Handle NaN.
+  if (std::isnan(x) || std::isnan(y)) return NAN;
+  // Handle +0 and -0.
+  if (std::signbit(x) < std::signbit(y)) return x;
+  if (std::signbit(y) < std::signbit(x)) return y;
+  return x > y ? x : y;
 }
 
 void Simulator::ExecuteGeneric(Instruction* instr) {
   uint32_t opcode = instr->OpcodeBase();
   switch (opcode) {
+      // Prefixed instructions.
+    case PLOAD_STORE_8LS:
+    case PLOAD_STORE_MLS: {
+      // TODO(miladfarca): Simulate PC-relative capability indicated by the R
+      // bit.
+      DCHECK_NE(instr->Bit(20), 1);
+      // Read prefix value.
+      uint64_t prefix_value = instr->Bits(17, 0);
+      // Read suffix (next instruction).
+      Instruction* next_instr =
+          reinterpret_cast<Instruction*>(get_pc() + kInstrSize);
+      uint16_t suffix_value = next_instr->Bits(15, 0);
+      int64_t im_val = SIGN_EXT_IMM34((prefix_value << 16) | suffix_value);
+      switch (next_instr->OpcodeBase()) {
+          // Prefixed ADDI.
+        case ADDI: {
+          int rt = next_instr->RTValue();
+          int ra = next_instr->RAValue();
+          intptr_t alu_out;
+          if (ra == 0) {
+            alu_out = im_val;
+          } else {
+            intptr_t ra_val = get_register(ra);
+            alu_out = ra_val + im_val;
+          }
+          set_register(rt, alu_out);
+          break;
+        }
+          // Prefixed LBZ.
+        case LBZ: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          set_register(rt, ReadB(ra_val + im_val) & 0xFF);
+          break;
+        }
+          // Prefixed LHZ.
+        case LHZ: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          uintptr_t result = ReadHU(ra_val + im_val) & 0xFFFF;
+          set_register(rt, result);
+          break;
+        }
+          // Prefixed LHA.
+        case LHA: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          intptr_t result = ReadH(ra_val + im_val);
+          set_register(rt, result);
+          break;
+        }
+          // Prefixed LWZ.
+        case LWZ: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          set_register(rt, ReadWU(ra_val + im_val));
+          break;
+        }
+          // Prefixed LWA.
+        case PPLWA: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          int64_t ra_val = ra == 0 ? 0 : get_register(ra);
+          set_register(rt, ReadW(ra_val + im_val));
+          break;
+        }
+          // Prefixed LD.
+        case PPLD: {
+          int ra = next_instr->RAValue();
+          int rt = next_instr->RTValue();
+          int64_t ra_val = ra == 0 ? 0 : get_register(ra);
+          set_register(rt, ReadDW(ra_val + im_val));
+          break;
+        }
+          // Prefixed LFS.
+        case LFS: {
+          int frt = next_instr->RTValue();
+          int ra = next_instr->RAValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          int32_t val = ReadW(ra_val + im_val);
+          float* fptr = reinterpret_cast<float*>(&val);
+#if V8_HOST_ARCH_IA32 || V8_HOST_ARCH_X64
+          // Conversion using double changes sNan to qNan on ia32/x64
+          if ((val & 0x7F800000) == 0x7F800000) {
+            int64_t dval = static_cast<int64_t>(val);
+            dval = ((dval & 0xC0000000) << 32) | ((dval & 0x40000000) << 31) |
+                   ((dval & 0x40000000) << 30) | ((dval & 0x7FFFFFFF) << 29) |
+                   0x0;
+            set_d_register(frt, dval);
+          } else {
+            set_d_register_from_double(frt, static_cast<double>(*fptr));
+          }
+#else
+          set_d_register_from_double(frt, static_cast<double>(*fptr));
+#endif
+          break;
+        }
+          // Prefixed LFD.
+        case LFD: {
+          int frt = next_instr->RTValue();
+          int ra = next_instr->RAValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          int64_t dptr = ReadDW(ra_val + im_val);
+          set_d_register(frt, dptr);
+          break;
+        }
+        // Prefixed STB.
+        case STB: {
+          int ra = next_instr->RAValue();
+          int rs = next_instr->RSValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          WriteB(ra_val + im_val, get_register(rs));
+          break;
+        }
+        // Prefixed STH.
+        case STH: {
+          int ra = next_instr->RAValue();
+          int rs = next_instr->RSValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          WriteH(ra_val + im_val, get_register(rs));
+          break;
+        }
+        // Prefixed STW.
+        case STW: {
+          int ra = next_instr->RAValue();
+          int rs = next_instr->RSValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          WriteW(ra_val + im_val, get_register(rs));
+          break;
+        }
+        // Prefixed STD.
+        case PPSTD: {
+          int ra = next_instr->RAValue();
+          int rs = next_instr->RSValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          WriteDW(ra_val + im_val, get_register(rs));
+          break;
+        }
+        // Prefixed STFS.
+        case STFS: {
+          int frs = next_instr->RSValue();
+          int ra = next_instr->RAValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          float frs_val = static_cast<float>(get_double_from_d_register(frs));
+          int32_t* p;
+#if V8_HOST_ARCH_IA32 || V8_HOST_ARCH_X64
+          // Conversion using double changes sNan to qNan on ia32/x64
+          int32_t sval = 0;
+          int64_t dval = get_d_register(frs);
+          if ((dval & 0x7FF0000000000000) == 0x7FF0000000000000) {
+            sval = ((dval & 0xC000000000000000) >> 32) |
+                   ((dval & 0x07FFFFFFE0000000) >> 29);
+            p = &sval;
+          } else {
+            p = reinterpret_cast<int32_t*>(&frs_val);
+          }
+#else
+          p = reinterpret_cast<int32_t*>(&frs_val);
+#endif
+          WriteW(ra_val + im_val, *p);
+          break;
+        }
+        // Prefixed STFD.
+        case STFD: {
+          int frs = next_instr->RSValue();
+          int ra = next_instr->RAValue();
+          intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+          int64_t frs_val = get_d_register(frs);
+          WriteDW(ra_val + im_val, frs_val);
+          break;
+        }
+        default:
+          UNREACHABLE();
+      }
+      // We have now executed instructions at this as well as next pc.
+      set_pc(get_pc() + (2 * kInstrSize));
+      break;
+    }
     case SUBFIC: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -1436,10 +1749,8 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       uint32_t im_val = instr->Bits(15, 0);
       int cr = instr->Bits(25, 23);
       uint32_t bf = 0;
-#if V8_TARGET_ARCH_PPC64
       int L = instr->Bit(21);
       if (L) {
-#endif
         uintptr_t ra_val = get_register(ra);
         if (ra_val < im_val) {
           bf |= 0x80000000;
@@ -1450,7 +1761,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
         if (ra_val == im_val) {
           bf |= 0x20000000;
         }
-#if V8_TARGET_ARCH_PPC64
       } else {
         uint32_t ra_val = get_register(ra);
         if (ra_val < im_val) {
@@ -1463,7 +1773,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           bf |= 0x20000000;
         }
       }
-#endif
       uint32_t condition_mask = 0xF0000000U >> (cr * 4);
       uint32_t condition = bf >> (cr * 4);
       condition_reg_ = (condition_reg_ & ~condition_mask) | condition;
@@ -1475,10 +1784,8 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       im_val = SIGN_EXT_IMM16(im_val);
       int cr = instr->Bits(25, 23);
       uint32_t bf = 0;
-#if V8_TARGET_ARCH_PPC64
       int L = instr->Bit(21);
       if (L) {
-#endif
         intptr_t ra_val = get_register(ra);
         if (ra_val < im_val) {
           bf |= 0x80000000;
@@ -1489,7 +1796,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
         if (ra_val == im_val) {
           bf |= 0x20000000;
         }
-#if V8_TARGET_ARCH_PPC64
       } else {
         int32_t ra_val = get_register(ra);
         if (ra_val < im_val) {
@@ -1502,7 +1808,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           bf |= 0x20000000;
         }
       }
-#endif
       uint32_t condition_mask = 0xF0000000U >> (cr * 4);
       uint32_t condition = bf >> (cr * 4);
       condition_reg_ = (condition_reg_ & ~condition_mask) | condition;
@@ -1610,7 +1915,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     case CRORC:
     case CROR: {
       UNIMPLEMENTED();  // Not used by V8.
-      break;
     }
     case RLWIMIX: {
       int ra = instr->RAValue();
@@ -1757,7 +2061,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case SRDX: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -1771,7 +2074,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
     case MODUW: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -1782,7 +2084,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(rt, alu_out);
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case MODUD: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -1793,7 +2094,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(rt, alu_out);
       break;
     }
-#endif
     case MODSW: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -1807,7 +2107,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(rt, alu_out);
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case MODSD: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -1825,7 +2124,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(rt, alu_out);
       break;
     }
-#endif
     case SRAW: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -1839,7 +2137,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case SRAD: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -1853,7 +2150,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
     case SRAWIX: {
       int ra = instr->RAValue();
       int rs = instr->RSValue();
@@ -1866,7 +2162,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case EXTSW: {
       const int shift = kBitsPerSystemPointer - 32;
       int ra = instr->RAValue();
@@ -1879,7 +2174,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
     case EXTSH: {
       const int shift = kBitsPerSystemPointer - 16;
       int ra = instr->RAValue();
@@ -1948,7 +2242,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFSUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFSX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -1979,7 +2273,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFDUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFDX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2008,7 +2302,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(ra, count);
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case POPCNTD: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2023,7 +2316,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_register(ra, count);
       break;
     }
-#endif
     case SYNC: {
       // todo - simulate sync
       __sync_synchronize();
@@ -2138,10 +2430,8 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       int rb = instr->RBValue();
       int cr = instr->Bits(25, 23);
       uint32_t bf = 0;
-#if V8_TARGET_ARCH_PPC64
       int L = instr->Bit(21);
       if (L) {
-#endif
         intptr_t ra_val = get_register(ra);
         intptr_t rb_val = get_register(rb);
         if (ra_val < rb_val) {
@@ -2153,7 +2443,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
         if (ra_val == rb_val) {
           bf |= 0x20000000;
         }
-#if V8_TARGET_ARCH_PPC64
       } else {
         int32_t ra_val = get_register(ra);
         int32_t rb_val = get_register(rb);
@@ -2167,7 +2456,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           bf |= 0x20000000;
         }
       }
-#endif
       uint32_t condition_mask = 0xF0000000U >> (cr * 4);
       uint32_t condition = bf >> (cr * 4);
       condition_reg_ = (condition_reg_ & ~condition_mask) | condition;
@@ -2283,17 +2571,39 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
+    case MULHD: {
+      int rt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      int64_t ra_val = get_register(ra);
+      int64_t rb_val = get_register(rb);
+      int64_t alu_out = base::bits::SignedMulHigh64(ra_val, rb_val);
+      set_register(rt, alu_out);
+      if (instr->Bit(0)) {  // RC bit set
+        SetCR0(static_cast<intptr_t>(alu_out));
+      }
+      break;
+    }
+    case MULHDU: {
+      int rt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      uint64_t ra_val = get_register(ra);
+      uint64_t rb_val = get_register(rb);
+      uint64_t alu_out = base::bits::UnsignedMulHigh64(ra_val, rb_val);
+      set_register(rt, alu_out);
+      if (instr->Bit(0)) {  // RC bit set
+        SetCR0(static_cast<intptr_t>(alu_out));
+      }
+      break;
+    }
     case NEGX: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
       intptr_t ra_val = get_register(ra);
       intptr_t alu_out = 1 + ~ra_val;
-#if V8_TARGET_ARCH_PPC64
       intptr_t one = 1;  // work-around gcc
       intptr_t kOverflowVal = (one << 63);
-#else
-      intptr_t kOverflowVal = kMinInt;
-#endif
       set_register(rt, alu_out);
       if (instr->Bit(10)) {  // OE bit set
         if (ra_val == kOverflowVal) {
@@ -2321,7 +2631,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case SLDX: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2370,7 +2679,21 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
         DCHECK_EQ(instr->Bit(0), 1);
         set_simd_register_by_lane<int64_t>(frt, 0,
                                            static_cast<int64_t>(ra_val));
+        // Low 64 bits of the result is undefined,
+        // Which is simulated here by adding random bits.
+        set_simd_register_by_lane<int64_t>(
+            frt, 1, static_cast<int64_t>(0x123456789ABCD));
       }
+      break;
+    }
+    case MTVSRDD: {
+      int xt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      set_simd_register_by_lane<int64_t>(
+          xt, 0, static_cast<int64_t>(get_register(ra)));
+      set_simd_register_by_lane<int64_t>(
+          xt, 1, static_cast<int64_t>(get_register(rb)));
       break;
     }
     case MTVSRWA: {
@@ -2389,7 +2712,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_d_register(frt, ra_val);
       break;
     }
-#endif
     case CNTLZWX: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2415,7 +2737,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case CNTLZDX: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2441,7 +2762,42 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
+    case CNTTZWX: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      uint32_t rs_val = static_cast<uint32_t>(get_register(rs));
+      uintptr_t count = rs_val == 0 ? 32 : __builtin_ctz(rs_val);
+      set_register(ra, count);
+      if (instr->Bit(0)) {  // RC Bit set
+        int bf = 0;
+        if (count > 0) {
+          bf |= 0x40000000;
+        }
+        if (count == 0) {
+          bf |= 0x20000000;
+        }
+        condition_reg_ = (condition_reg_ & ~0xF0000000) | bf;
+      }
+      break;
+    }
+    case CNTTZDX: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      uint64_t rs_val = get_register(rs);
+      uintptr_t count = rs_val == 0 ? 64 : __builtin_ctzl(rs_val);
+      set_register(ra, count);
+      if (instr->Bit(0)) {  // RC Bit set
+        int bf = 0;
+        if (count > 0) {
+          bf |= 0x40000000;
+        }
+        if (count == 0) {
+          bf |= 0x20000000;
+        }
+        condition_reg_ = (condition_reg_ & ~0xF0000000) | bf;
+      }
+      break;
+    }
     case ANDX: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2473,10 +2829,8 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       int rb = instr->RBValue();
       int cr = instr->Bits(25, 23);
       uint32_t bf = 0;
-#if V8_TARGET_ARCH_PPC64
       int L = instr->Bit(21);
       if (L) {
-#endif
         uintptr_t ra_val = get_register(ra);
         uintptr_t rb_val = get_register(rb);
         if (ra_val < rb_val) {
@@ -2488,7 +2842,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
         if (ra_val == rb_val) {
           bf |= 0x20000000;
         }
-#if V8_TARGET_ARCH_PPC64
       } else {
         uint32_t ra_val = get_register(ra);
         uint32_t rb_val = get_register(rb);
@@ -2502,7 +2855,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           bf |= 0x20000000;
         }
       }
-#endif
       uint32_t condition_mask = 0xF0000000U >> (cr * 4);
       uint32_t condition = bf >> (cr * 4);
       condition_reg_ = (condition_reg_ & ~condition_mask) | condition;
@@ -2565,7 +2917,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       // todo - handle OE bit
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case MULLD: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -2580,7 +2931,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       // todo - handle OE bit
       break;
     }
-#endif
     case DIVW: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -2628,7 +2978,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case DIVD: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -2665,7 +3014,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       // todo - handle OE bit
       break;
     }
-#endif
     case ADDX: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -2808,7 +3156,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#if V8_TARGET_ARCH_PPC64
     case LWAX: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
@@ -2833,6 +3180,56 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
+    case LDBRX: {
+      int rt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+      intptr_t rb_val = get_register(rb);
+      intptr_t result = ByteReverse<int64_t>(ReadDW(ra_val + rb_val));
+      set_register(rt, result);
+      break;
+    }
+    case LWBRX: {
+      int rt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+      intptr_t rb_val = get_register(rb);
+      intptr_t result = ByteReverse<int32_t>(ReadW(ra_val + rb_val));
+      set_register(rt, result);
+      break;
+    }
+    case STDBRX: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+      intptr_t rs_val = get_register(rs);
+      intptr_t rb_val = get_register(rb);
+      WriteDW(ra_val + rb_val, ByteReverse<int64_t>(rs_val));
+      break;
+    }
+    case STWBRX: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+      intptr_t rs_val = get_register(rs);
+      intptr_t rb_val = get_register(rb);
+      WriteW(ra_val + rb_val, ByteReverse<int32_t>(rs_val));
+      break;
+    }
+    case STHBRX: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
+      intptr_t rs_val = get_register(rs);
+      intptr_t rb_val = get_register(rb);
+      WriteH(ra_val + rb_val, ByteReverse<int16_t>(rs_val));
+      break;
+    }
     case STDX:
     case STDUX: {
       int rs = instr->RSValue();
@@ -2848,7 +3245,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
     case LBZX:
     case LBZUX: {
       int rt = instr->RTValue();
@@ -3000,7 +3396,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     case LMW:
     case STMW: {
       UNIMPLEMENTED();
-      break;
     }
 
     case LFSU:
@@ -3047,7 +3442,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     }
 
     case STFSU:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFS: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -3090,7 +3485,25 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-
+    case BRW: {
+      constexpr int kBitsPerWord = 32;
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      uint64_t rs_val = get_register(rs);
+      uint32_t rs_high = rs_val >> kBitsPerWord;
+      uint32_t rs_low = (rs_val << kBitsPerWord) >> kBitsPerWord;
+      uint64_t result = ByteReverse<int32_t>(rs_high);
+      result = (result << kBitsPerWord) | ByteReverse<int32_t>(rs_low);
+      set_register(ra, result);
+      break;
+    }
+    case BRD: {
+      int rs = instr->RSValue();
+      int ra = instr->RAValue();
+      uint64_t rs_val = get_register(rs);
+      set_register(ra, ByteReverse<int64_t>(rs_val));
+      break;
+    }
     case FCFIDS: {
       // fcfids
       int frt = instr->RTValue();
@@ -3320,7 +3733,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
             break;
           default:
             UNIMPLEMENTED();  // Not used by V8.
-            break;
         }
         if (frb_val < static_cast<double>(kMinVal)) {
           frt_val = kMinVal;
@@ -3365,7 +3777,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
             break;
           default:
             UNIMPLEMENTED();  // Not used by V8.
-            break;
         }
         if (frb_val < static_cast<double>(kMinVal)) {
           frt_val = kMinVal;
@@ -3417,7 +3828,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           }
           default:
             UNIMPLEMENTED();  // Not used by V8.
-            break;
         }
         if (frb_val < kMinVal) {
           frt_val = kMinVal;
@@ -3442,8 +3852,8 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
                      ? kRoundToZero
                      : (fp_condition_reg_ & kFPRoundingModeMask);
       uint64_t frt_val;
-      uint64_t kMinVal = 0;
-      uint64_t kMaxVal = kMinVal - 1;
+      uint64_t kMinVal = kMinUInt32;
+      uint64_t kMaxVal = kMaxUInt32;
       bool invalid_convert = false;
 
       if (std::isnan(frb_val)) {
@@ -3461,7 +3871,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
             break;
           default:
             UNIMPLEMENTED();  // Not used by V8.
-            break;
         }
         if (frb_val < kMinVal) {
           frt_val = kMinVal;
@@ -3482,6 +3891,16 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       int frb = instr->RBValue();
       double frb_val = get_double_from_d_register(frb);
       double frt_val = -frb_val;
+      set_d_register_from_double(frt, frt_val);
+      return;
+    }
+    case FCPSGN: {
+      int frt = instr->RTValue();
+      int frb = instr->RBValue();
+      int fra = instr->RAValue();
+      double frb_val = get_double_from_d_register(frb);
+      double fra_val = get_double_from_d_register(fra);
+      double frt_val = std::copysign(frb_val, fra_val);
       set_d_register_from_double(frt, frt_val);
       return;
     }
@@ -3544,7 +3963,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
           break;
         default:
           UNIMPLEMENTED();
-          break;
       }
       return;
     }
@@ -3572,8 +3990,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_d_register_from_double(frt, frt_val);
       return;
     }
-
-#if V8_TARGET_ARCH_PPC64
     case RLDICL: {
       int ra = instr->RAValue();
       int rs = instr->RSValue();
@@ -3723,8 +4139,6 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       }
       break;
     }
-#endif
-
     case XSADDDP: {
       int frt = instr->RTValue();
       int fra = instr->RAValue();
@@ -3765,36 +4179,135 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       set_d_register_from_double(frt, frt_val);
       return;
     }
+    case MTCRF: {
+      int rs = instr->RSValue();
+      uint32_t rs_val = static_cast<int32_t>(get_register(rs));
+      uint8_t fxm = instr->Bits(19, 12);
+      uint8_t bit_mask = 0x80;
+      const int field_bit_count = 4;
+      const int max_field_index = 7;
+      uint32_t result = 0;
+      for (int i = 0; i <= max_field_index; i++) {
+        result <<= field_bit_count;
+        uint32_t source = condition_reg_;
+        if ((bit_mask & fxm) != 0) {
+          // take it from rs.
+          source = rs_val;
+        }
+        result |= ((source << i * field_bit_count) >> i * field_bit_count) >>
+                  (max_field_index - i) * field_bit_count;
+        bit_mask >>= 1;
+      }
+      condition_reg_ = result;
+      break;
+    }
     // Vector instructions.
+    case LVX: {
+      DECODE_VX_INSTRUCTION(vrt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      intptr_t addr = (ra_val + rb_val) & 0xFFFFFFFFFFFFFFF0;
+      simdr_t* ptr = reinterpret_cast<simdr_t*>(addr);
+      set_simd_register(vrt, *ptr);
+      break;
+    }
     case STVX: {
       DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
-      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
-      intptr_t rb_val = get_register(rb);
-      __int128 vrs_val =
-          *(reinterpret_cast<__int128*>(get_simd_register(vrs).int8));
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      __int128 vrs_val = base::bit_cast<__int128>(get_simd_register(vrs).int8);
       WriteQW((ra_val + rb_val) & 0xFFFFFFFFFFFFFFF0, vrs_val);
       break;
     }
     case LXVD: {
       DECODE_VX_INSTRUCTION(xt, ra, rb, T)
-      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
-      intptr_t rb_val = get_register(rb);
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
       set_simd_register_by_lane<int64_t>(xt, 0, ReadDW(ra_val + rb_val));
       set_simd_register_by_lane<int64_t>(
           xt, 1, ReadDW(ra_val + rb_val + kSystemPointerSize));
       break;
     }
+    case LXVX: {
+      DECODE_VX_INSTRUCTION(vrt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      intptr_t addr = ra_val + rb_val;
+      simdr_t* ptr = reinterpret_cast<simdr_t*>(addr);
+      set_simd_register(vrt, *ptr);
+      break;
+    }
     case STXVD: {
       DECODE_VX_INSTRUCTION(xs, ra, rb, S)
-      intptr_t ra_val = ra == 0 ? 0 : get_register(ra);
-      intptr_t rb_val = get_register(rb);
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
       WriteDW(ra_val + rb_val, get_simd_register_by_lane<int64_t>(xs, 0));
       WriteDW(ra_val + rb_val + kSystemPointerSize,
               get_simd_register_by_lane<int64_t>(xs, 1));
       break;
     }
+    case STXVX: {
+      DECODE_VX_INSTRUCTION(vrs, ra, rb, S)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      intptr_t addr = ra_val + rb_val;
+      __int128 vrs_val = base::bit_cast<__int128>(get_simd_register(vrs).int8);
+      WriteQW(addr, vrs_val);
+      break;
+    }
+    case LXSIBZX: {
+      DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      set_simd_register_by_lane<uint64_t>(xt, 0, ReadBU(ra_val + rb_val));
+      break;
+    }
+    case LXSIHZX: {
+      DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      set_simd_register_by_lane<uint64_t>(xt, 0, ReadHU(ra_val + rb_val));
+      break;
+    }
+    case LXSIWZX: {
+      DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      set_simd_register_by_lane<uint64_t>(xt, 0, ReadWU(ra_val + rb_val));
+      break;
+    }
+    case LXSDX: {
+      DECODE_VX_INSTRUCTION(xt, ra, rb, T)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      set_simd_register_by_lane<int64_t>(xt, 0, ReadDW(ra_val + rb_val));
+      break;
+    }
+    case STXSIBX: {
+      DECODE_VX_INSTRUCTION(xs, ra, rb, S)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      WriteB(ra_val + rb_val, get_simd_register_by_lane<int8_t>(xs, 7));
+      break;
+    }
+    case STXSIHX: {
+      DECODE_VX_INSTRUCTION(xs, ra, rb, S)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      WriteH(ra_val + rb_val, get_simd_register_by_lane<int16_t>(xs, 3));
+      break;
+    }
+    case STXSIWX: {
+      DECODE_VX_INSTRUCTION(xs, ra, rb, S)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      WriteW(ra_val + rb_val, get_simd_register_by_lane<int32_t>(xs, 1));
+      break;
+    }
+    case STXSDX: {
+      DECODE_VX_INSTRUCTION(xs, ra, rb, S)
+      GET_ADDRESS(ra, rb, ra_val, rb_val)
+      WriteDW(ra_val + rb_val, get_simd_register_by_lane<int64_t>(xs, 0));
+      break;
+    }
+    case XXBRQ: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      __int128 xb_val = base::bit_cast<__int128>(get_simd_register(b).int8);
+      __int128 xb_val_reversed = __builtin_bswap128(xb_val);
+      simdr_t simdr_xb = base::bit_cast<simdr_t>(xb_val_reversed);
+      set_simd_register(t, simdr_xb);
+      break;
+    }
 #define VSPLT(type)                                       \
-  uint32_t uim = instr->Bits(20, 16);                     \
+  uint8_t uim = instr->Bits(19, 16);                      \
   int vrt = instr->RTValue();                             \
   int vrb = instr->RBValue();                             \
   type value = get_simd_register_by_lane<type>(vrb, uim); \
@@ -3811,12 +4324,37 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       VSPLT(int8_t)
       break;
     }
+    case XXSPLTIB: {
+      int8_t imm8 = instr->Bits(18, 11);
+      int t = instr->RTValue();
+      FOR_EACH_LANE(i, int8_t) {
+        set_simd_register_by_lane<int8_t>(t, i, imm8);
+      }
+      break;
+    }
 #undef VSPLT
-#define VINSERT(type, element)                                              \
-  uint32_t uim = static_cast<uint32_t>(instr->Bits(20, 16)) / sizeof(type); \
-  int vrt = instr->RTValue();                                               \
-  int vrb = instr->RBValue();                                               \
-  set_simd_register_by_lane<type>(                                          \
+#define VSPLTI(type)                                                \
+  type sim = static_cast<type>(SIGN_EXT_IMM5(instr->Bits(20, 16))); \
+  int vrt = instr->RTValue();                                       \
+  FOR_EACH_LANE(i, type) { set_simd_register_by_lane<type>(vrt, i, sim); }
+    case VSPLTISW: {
+      VSPLTI(int32_t)
+      break;
+    }
+    case VSPLTISH: {
+      VSPLTI(int16_t)
+      break;
+    }
+    case VSPLTISB: {
+      VSPLTI(int8_t)
+      break;
+    }
+#undef VSPLTI
+#define VINSERT(type, element)       \
+  uint8_t uim = instr->Bits(19, 16); \
+  int vrt = instr->RTValue();        \
+  int vrb = instr->RBValue();        \
+  set_simd_register_bytes<type>(     \
       vrt, uim, get_simd_register_by_lane<type>(vrb, element));
     case VINSERTD: {
       VINSERT(int64_t, 0)
@@ -3835,13 +4373,28 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
 #undef VINSERT
-#define VEXTRACT(type, element)                                             \
-  uint32_t uim = static_cast<uint32_t>(instr->Bits(20, 16)) / sizeof(type); \
-  int vrt = instr->RTValue();                                               \
-  int vrb = instr->RBValue();                                               \
-  type val = get_simd_register_by_lane<type>(vrb, uim);                     \
-  set_simd_register_by_lane<uint64_t>(vrt, 0, 0);                           \
-  set_simd_register_by_lane<uint64_t>(vrt, 1, 0);                           \
+#define VINSERT_IMMEDIATE(type)                   \
+  uint8_t uim = instr->Bits(19, 16);              \
+  int vrt = instr->RTValue();                     \
+  int rb = instr->RBValue();                      \
+  type src = static_cast<type>(get_register(rb)); \
+  set_simd_register_bytes<type>(vrt, uim, src);
+    case VINSD: {
+      VINSERT_IMMEDIATE(int64_t)
+      break;
+    }
+    case VINSW: {
+      VINSERT_IMMEDIATE(int32_t)
+      break;
+    }
+#undef VINSERT_IMMEDIATE
+#define VEXTRACT(type, element)                       \
+  uint8_t uim = instr->Bits(19, 16);                  \
+  int vrt = instr->RTValue();                         \
+  int vrb = instr->RBValue();                         \
+  type val = get_simd_register_bytes<type>(vrb, uim); \
+  set_simd_register_by_lane<uint64_t>(vrt, 0, 0);     \
+  set_simd_register_by_lane<uint64_t>(vrt, 1, 0);     \
   set_simd_register_by_lane<type>(vrt, element, val);
     case VEXTRACTD: {
       VEXTRACT(uint64_t, 0)
@@ -3869,6 +4422,10 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
   }
     case VAND: {
       VECTOR_LOGICAL_OP(a_val & b_val)
+      break;
+    }
+    case VANDC: {
+      VECTOR_LOGICAL_OP(a_val & (~b_val))
       break;
     }
     case VOR: {
@@ -3904,6 +4461,10 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       VECTOR_ARITHMETIC_OP(double, *)
       break;
     }
+    case XVDIVDP: {
+      VECTOR_ARITHMETIC_OP(double, /)
+      break;
+    }
     case VADDFP: {
       VECTOR_ARITHMETIC_OP(float, +)
       break;
@@ -3916,12 +4477,20 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       VECTOR_ARITHMETIC_OP(float, *)
       break;
     }
+    case XVDIVSP: {
+      VECTOR_ARITHMETIC_OP(float, /)
+      break;
+    }
     case VADDUDM: {
       VECTOR_ARITHMETIC_OP(int64_t, +)
       break;
     }
     case VSUBUDM: {
       VECTOR_ARITHMETIC_OP(int64_t, -)
+      break;
+    }
+    case VMULLD: {
+      VECTOR_ARITHMETIC_OP(int64_t, *)
       break;
     }
     case VADDUWM: {
@@ -3952,6 +4521,97 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       VECTOR_ARITHMETIC_OP(int8_t, -)
       break;
     }
+#define VECTOR_MULTIPLY_EVEN_ODD(input_type, result_type, is_odd)              \
+  DECODE_VX_INSTRUCTION(t, a, b, T)                                            \
+  size_t i = 0, j = 0, k = 0;                                                  \
+  size_t lane_size = sizeof(input_type);                                       \
+  if (is_odd) {                                                                \
+    i = 1;                                                                     \
+    j = lane_size;                                                             \
+  }                                                                            \
+  for (; j < kSimd128Size; i += 2, j += lane_size * 2, k++) {                  \
+    result_type src0 =                                                         \
+        static_cast<result_type>(get_simd_register_by_lane<input_type>(a, i)); \
+    result_type src1 =                                                         \
+        static_cast<result_type>(get_simd_register_by_lane<input_type>(b, i)); \
+    set_simd_register_by_lane<result_type>(t, k, src0 * src1);                 \
+  }
+    case VMULEUB: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint8_t, uint16_t, false)
+      break;
+    }
+    case VMULESB: {
+      VECTOR_MULTIPLY_EVEN_ODD(int8_t, int16_t, false)
+      break;
+    }
+    case VMULOUB: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint8_t, uint16_t, true)
+      break;
+    }
+    case VMULOSB: {
+      VECTOR_MULTIPLY_EVEN_ODD(int8_t, int16_t, true)
+      break;
+    }
+    case VMULEUH: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint16_t, uint32_t, false)
+      break;
+    }
+    case VMULESH: {
+      VECTOR_MULTIPLY_EVEN_ODD(int16_t, int32_t, false)
+      break;
+    }
+    case VMULOUH: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint16_t, uint32_t, true)
+      break;
+    }
+    case VMULOSH: {
+      VECTOR_MULTIPLY_EVEN_ODD(int16_t, int32_t, true)
+      break;
+    }
+    case VMULEUW: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint32_t, uint64_t, false)
+      break;
+    }
+    case VMULESW: {
+      VECTOR_MULTIPLY_EVEN_ODD(int32_t, int64_t, false)
+      break;
+    }
+    case VMULOUW: {
+      VECTOR_MULTIPLY_EVEN_ODD(uint32_t, uint64_t, true)
+      break;
+    }
+    case VMULOSW: {
+      VECTOR_MULTIPLY_EVEN_ODD(int32_t, int64_t, true)
+      break;
+    }
+#undef VECTOR_MULTIPLY_EVEN_ODD
+#define VECTOR_MERGE(type, is_low_side)                                    \
+  DECODE_VX_INSTRUCTION(t, a, b, T)                                        \
+  constexpr size_t index_limit = (kSimd128Size / sizeof(type)) / 2;        \
+  for (size_t i = 0, source_index = is_low_side ? i + index_limit : i;     \
+       i < index_limit; i++, source_index++) {                             \
+    set_simd_register_by_lane<type>(                                       \
+        t, 2 * i, get_simd_register_by_lane<type>(a, source_index));       \
+    set_simd_register_by_lane<type>(                                       \
+        t, (2 * i) + 1, get_simd_register_by_lane<type>(b, source_index)); \
+  }
+    case VMRGLW: {
+      VECTOR_MERGE(int32_t, true)
+      break;
+    }
+    case VMRGHW: {
+      VECTOR_MERGE(int32_t, false)
+      break;
+    }
+    case VMRGLH: {
+      VECTOR_MERGE(int16_t, true)
+      break;
+    }
+    case VMRGHH: {
+      VECTOR_MERGE(int16_t, false)
+      break;
+    }
+#undef VECTOR_MERGE
 #undef VECTOR_ARITHMETIC_OP
 #define VECTOR_MIN_MAX_OP(type, op)                                        \
   DECODE_VX_INSTRUCTION(t, a, b, T)                                        \
@@ -3960,6 +4620,56 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     type b_val = get_simd_register_by_lane<type>(b, i);                    \
     set_simd_register_by_lane<type>(t, i, a_val op b_val ? a_val : b_val); \
   }
+    case XSMINDP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      double a_val = get_double_from_d_register(a);
+      double b_val = get_double_from_d_register(b);
+      set_d_register_from_double(t, VSXFPMin<double>(a_val, b_val));
+      break;
+    }
+    case XSMAXDP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      double a_val = get_double_from_d_register(a);
+      double b_val = get_double_from_d_register(b);
+      set_d_register_from_double(t, VSXFPMax<double>(a_val, b_val));
+      break;
+    }
+    case XVMINDP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      FOR_EACH_LANE(i, double) {
+        double a_val = get_simd_register_by_lane<double>(a, i);
+        double b_val = get_simd_register_by_lane<double>(b, i);
+        set_simd_register_by_lane<double>(t, i, VSXFPMin<double>(a_val, b_val));
+      }
+      break;
+    }
+    case XVMAXDP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      FOR_EACH_LANE(i, double) {
+        double a_val = get_simd_register_by_lane<double>(a, i);
+        double b_val = get_simd_register_by_lane<double>(b, i);
+        set_simd_register_by_lane<double>(t, i, VSXFPMax<double>(a_val, b_val));
+      }
+      break;
+    }
+    case VMINFP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      FOR_EACH_LANE(i, float) {
+        float a_val = get_simd_register_by_lane<float>(a, i);
+        float b_val = get_simd_register_by_lane<float>(b, i);
+        set_simd_register_by_lane<float>(t, i, VMXFPMin(a_val, b_val));
+      }
+      break;
+    }
+    case VMAXFP: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      FOR_EACH_LANE(i, float) {
+        float a_val = get_simd_register_by_lane<float>(a, i);
+        float b_val = get_simd_register_by_lane<float>(b, i);
+        set_simd_register_by_lane<float>(t, i, VMXFPMax(a_val, b_val));
+      }
+      break;
+    }
     case VMINSD: {
       VECTOR_MIN_MAX_OP(int64_t, <)
       break;
@@ -4158,32 +4868,545 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
 #undef VECTOR_COMPARE_OP
-#undef FOR_EACH_LANE
-#undef DECODE_VX_INSTRUCTION
-    default: {
-      UNIMPLEMENTED();
+    case XVCVSPSXWS: {
+      VectorConverFromFPSaturate<float, int32_t>(this, instr, kMinInt, kMaxInt);
       break;
     }
+    case XVCVSPUXWS: {
+      VectorConverFromFPSaturate<float, uint32_t>(this, instr, 0, kMaxUInt32);
+      break;
+    }
+    case XVCVDPSXWS: {
+      VectorConverFromFPSaturate<double, int32_t>(this, instr, kMinInt, kMaxInt,
+                                                  true);
+      break;
+    }
+    case XVCVDPUXWS: {
+      VectorConverFromFPSaturate<double, uint32_t>(this, instr, 0, kMaxUInt32,
+                                                   true);
+      break;
+    }
+    case XVCVSXWSP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, int32_t) {
+        int32_t b_val = get_simd_register_by_lane<int32_t>(b, i);
+        set_simd_register_by_lane<float>(t, i, static_cast<float>(b_val));
+      }
+      break;
+    }
+    case XVCVUXWSP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, uint32_t) {
+        uint32_t b_val = get_simd_register_by_lane<uint32_t>(b, i);
+        set_simd_register_by_lane<float>(t, i, static_cast<float>(b_val));
+      }
+      break;
+    }
+    case XVCVSXDDP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, int64_t) {
+        int64_t b_val = get_simd_register_by_lane<int64_t>(b, i);
+        set_simd_register_by_lane<double>(t, i, static_cast<double>(b_val));
+      }
+      break;
+    }
+    case XVCVUXDDP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, uint64_t) {
+        uint64_t b_val = get_simd_register_by_lane<uint64_t>(b, i);
+        set_simd_register_by_lane<double>(t, i, static_cast<double>(b_val));
+      }
+      break;
+    }
+    case XVCVSPDP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, double) {
+        float b_val = get_simd_register_by_lane<float>(b, 2 * i);
+        set_simd_register_by_lane<double>(t, i, static_cast<double>(b_val));
+      }
+      break;
+    }
+    case XVCVDPSP: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, double) {
+        double b_val = get_simd_register_by_lane<double>(b, i);
+        set_simd_register_by_lane<float>(t, 2 * i, static_cast<float>(b_val));
+      }
+      break;
+    }
+    case XSCVSPDPN: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      uint64_t double_bits = get_d_register(b);
+      // Value is at the high 32 bits of the register.
+      float f = base::bit_cast<float, uint32_t>(
+          static_cast<uint32_t>(double_bits >> 32));
+      double_bits = base::bit_cast<uint64_t, double>(static_cast<double>(f));
+      // Preserve snan.
+      if (is_snan(f)) {
+        double_bits &= 0xFFF7FFFFFFFFFFFFU;  // Clear bit 51.
+      }
+      set_d_register(t, double_bits);
+      break;
+    }
+    case XSCVDPSPN: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      double b_val = get_double_from_d_register(b);
+      uint64_t float_bits = static_cast<uint64_t>(
+          base::bit_cast<uint32_t, float>(static_cast<float>(b_val)));
+      // Preserve snan.
+      if (is_snan(b_val)) {
+        float_bits &= 0xFFBFFFFFU;  // Clear bit 22.
+      }
+      // fp result is placed in both 32bit halfs of the dst.
+      float_bits = (float_bits << 32) | float_bits;
+      set_d_register(t, float_bits);
+      break;
+    }
+#define VECTOR_UNPACK(S, D, if_high_side)                           \
+  int t = instr->RTValue();                                         \
+  int b = instr->RBValue();                                         \
+  constexpr size_t kItemCount = kSimd128Size / sizeof(D);           \
+  D temps[kItemCount] = {0};                                        \
+  /* Avoid overwriting src if src and dst are the same register. */ \
+  FOR_EACH_LANE(i, D) {                                             \
+    temps[i] = get_simd_register_by_lane<S>(b, i, if_high_side);    \
+  }                                                                 \
+  FOR_EACH_LANE(i, D) {                                             \
+    set_simd_register_by_lane<D>(t, i, temps[i], if_high_side);     \
   }
-}  // NOLINT
+    case VUPKHSB: {
+      VECTOR_UNPACK(int8_t, int16_t, true)
+      break;
+    }
+    case VUPKHSH: {
+      VECTOR_UNPACK(int16_t, int32_t, true)
+      break;
+    }
+    case VUPKHSW: {
+      VECTOR_UNPACK(int32_t, int64_t, true)
+      break;
+    }
+    case VUPKLSB: {
+      VECTOR_UNPACK(int8_t, int16_t, false)
+      break;
+    }
+    case VUPKLSH: {
+      VECTOR_UNPACK(int16_t, int32_t, false)
+      break;
+    }
+    case VUPKLSW: {
+      VECTOR_UNPACK(int32_t, int64_t, false)
+      break;
+    }
+#undef VECTOR_UNPACK
+    case VPKSWSS: {
+      VectorPackSaturate<int32_t, int16_t>(this, instr, kMinInt16, kMaxInt16);
+      break;
+    }
+    case VPKSWUS: {
+      VectorPackSaturate<int32_t, uint16_t>(this, instr, 0, kMaxUInt16);
+      break;
+    }
+    case VPKSHSS: {
+      VectorPackSaturate<int16_t, int8_t>(this, instr, kMinInt8, kMaxInt8);
+      break;
+    }
+    case VPKSHUS: {
+      VectorPackSaturate<int16_t, uint8_t>(this, instr, 0, kMaxUInt8);
+      break;
+    }
+#define VECTOR_ADD_SUB_SATURATE(intermediate_type, result_type, op, min_val, \
+                                max_val)                                     \
+  DECODE_VX_INSTRUCTION(t, a, b, T)                                          \
+  FOR_EACH_LANE(i, result_type) {                                            \
+    intermediate_type a_val = static_cast<intermediate_type>(                \
+        get_simd_register_by_lane<result_type>(a, i));                       \
+    intermediate_type b_val = static_cast<intermediate_type>(                \
+        get_simd_register_by_lane<result_type>(b, i));                       \
+    intermediate_type t_val = a_val op b_val;                                \
+    if (t_val > max_val)                                                     \
+      t_val = max_val;                                                       \
+    else if (t_val < min_val)                                                \
+      t_val = min_val;                                                       \
+    set_simd_register_by_lane<result_type>(t, i,                             \
+                                           static_cast<result_type>(t_val)); \
+  }
+    case VADDSHS: {
+      VECTOR_ADD_SUB_SATURATE(int32_t, int16_t, +, kMinInt16, kMaxInt16)
+      break;
+    }
+    case VSUBSHS: {
+      VECTOR_ADD_SUB_SATURATE(int32_t, int16_t, -, kMinInt16, kMaxInt16)
+      break;
+    }
+    case VADDUHS: {
+      VECTOR_ADD_SUB_SATURATE(int32_t, uint16_t, +, 0, kMaxUInt16)
+      break;
+    }
+    case VSUBUHS: {
+      VECTOR_ADD_SUB_SATURATE(int32_t, uint16_t, -, 0, kMaxUInt16)
+      break;
+    }
+    case VADDSBS: {
+      VECTOR_ADD_SUB_SATURATE(int16_t, int8_t, +, kMinInt8, kMaxInt8)
+      break;
+    }
+    case VSUBSBS: {
+      VECTOR_ADD_SUB_SATURATE(int16_t, int8_t, -, kMinInt8, kMaxInt8)
+      break;
+    }
+    case VADDUBS: {
+      VECTOR_ADD_SUB_SATURATE(int16_t, uint8_t, +, 0, kMaxUInt8)
+      break;
+    }
+    case VSUBUBS: {
+      VECTOR_ADD_SUB_SATURATE(int16_t, uint8_t, -, 0, kMaxUInt8)
+      break;
+    }
+#undef VECTOR_ADD_SUB_SATURATE
+#define VECTOR_FP_ROUNDING(type, op)                       \
+  int t = instr->RTValue();                                \
+  int b = instr->RBValue();                                \
+  FOR_EACH_LANE(i, type) {                                 \
+    type b_val = get_simd_register_by_lane<type>(b, i);    \
+    set_simd_register_by_lane<type>(t, i, std::op(b_val)); \
+  }
+    case XVRDPIP: {
+      VECTOR_FP_ROUNDING(double, ceil)
+      break;
+    }
+    case XVRDPIM: {
+      VECTOR_FP_ROUNDING(double, floor)
+      break;
+    }
+    case XVRDPIZ: {
+      VECTOR_FP_ROUNDING(double, trunc)
+      break;
+    }
+    case XVRDPI: {
+      VECTOR_FP_ROUNDING(double, nearbyint)
+      break;
+    }
+    case XVRSPIP: {
+      VECTOR_FP_ROUNDING(float, ceilf)
+      break;
+    }
+    case XVRSPIM: {
+      VECTOR_FP_ROUNDING(float, floorf)
+      break;
+    }
+    case XVRSPIZ: {
+      VECTOR_FP_ROUNDING(float, truncf)
+      break;
+    }
+    case XVRSPI: {
+      VECTOR_FP_ROUNDING(float, nearbyintf)
+      break;
+    }
+#undef VECTOR_FP_ROUNDING
+    case VSEL: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      unsigned __int128 src_1 =
+          base::bit_cast<__int128>(get_simd_register(vra).int8);
+      unsigned __int128 src_2 =
+          base::bit_cast<__int128>(get_simd_register(vrb).int8);
+      unsigned __int128 src_3 =
+          base::bit_cast<__int128>(get_simd_register(vrc).int8);
+      unsigned __int128 tmp = (src_1 & ~src_3) | (src_2 & src_3);
+      simdr_t* result = reinterpret_cast<simdr_t*>(&tmp);
+      set_simd_register(vrt, *result);
+      break;
+    }
+    case VPERM: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      int8_t temp[kSimd128Size] = {0};
+      FOR_EACH_LANE(i, int8_t) {
+        int8_t lane_num = get_simd_register_by_lane<int8_t>(vrc, i);
+        // Get the five least significant bits.
+        lane_num = (lane_num << 3) >> 3;
+        int reg = vra;
+        if (lane_num >= kSimd128Size) {
+          lane_num = lane_num - kSimd128Size;
+          reg = vrb;
+        }
+        temp[i] = get_simd_register_by_lane<int8_t>(reg, lane_num);
+      }
+      FOR_EACH_LANE(i, int8_t) {
+        set_simd_register_by_lane<int8_t>(vrt, i, temp[i]);
+      }
+      break;
+    }
+    case VBPERMQ: {
+      DECODE_VX_INSTRUCTION(t, a, b, T)
+      uint16_t result_bits = 0;
+      unsigned __int128 src_bits =
+          base::bit_cast<__int128>(get_simd_register(a).int8);
+      for (int i = 0; i < kSimd128Size; i++) {
+        result_bits <<= 1;
+        uint8_t selected_bit_index = get_simd_register_by_lane<uint8_t>(b, i);
+        if (selected_bit_index < (kSimd128Size * kBitsPerByte)) {
+          unsigned __int128 bit_value = (src_bits << selected_bit_index) >>
+                                        (kSimd128Size * kBitsPerByte - 1);
+          result_bits |= bit_value;
+        }
+      }
+      set_simd_register_by_lane<uint64_t>(t, 0, 0);
+      set_simd_register_by_lane<uint64_t>(t, 1, 0);
+      set_simd_register_by_lane<uint16_t>(t, 3, result_bits);
+      break;
+    }
+#define VECTOR_FP_QF(type, sign, function)                       \
+  DECODE_VX_INSTRUCTION(t, a, b, T)                              \
+  FOR_EACH_LANE(i, type) {                                       \
+    type a_val = get_simd_register_by_lane<type>(a, i);          \
+    type b_val = get_simd_register_by_lane<type>(b, i);          \
+    type t_val = get_simd_register_by_lane<type>(t, i);          \
+    type reuslt = sign * function(a_val, t_val, (sign * b_val)); \
+    if (isinf(a_val)) reuslt = a_val;                            \
+    if (isinf(b_val)) reuslt = b_val;                            \
+    if (isinf(t_val)) reuslt = t_val;                            \
+    set_simd_register_by_lane<type>(t, i, reuslt);               \
+  }
+    case XVMADDMDP: {
+      VECTOR_FP_QF(double, +1, fma)
+      break;
+    }
+    case XVNMSUBMDP: {
+      VECTOR_FP_QF(double, -1, fma)
+      break;
+    }
+    case XVMADDMSP: {
+      VECTOR_FP_QF(float, +1, fmaf)
+      break;
+    }
+    case XVNMSUBMSP: {
+      VECTOR_FP_QF(float, -1, fmaf)
+      break;
+    }
+#undef VECTOR_FP_QF
+    case VMHRADDSHS: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      FOR_EACH_LANE(i, int16_t) {
+        int16_t vra_val = get_simd_register_by_lane<int16_t>(vra, i);
+        int16_t vrb_val = get_simd_register_by_lane<int16_t>(vrb, i);
+        int16_t vrc_val = get_simd_register_by_lane<int16_t>(vrc, i);
+        int32_t temp = vra_val * vrb_val;
+        temp = (temp + 0x00004000) >> 15;
+        temp += vrc_val;
+        if (temp > kMaxInt16)
+          temp = kMaxInt16;
+        else if (temp < kMinInt16)
+          temp = kMinInt16;
+        set_simd_register_by_lane<int16_t>(vrt, i, static_cast<int16_t>(temp));
+      }
+      break;
+    }
+    case VMSUMMBM: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      FOR_EACH_LANE(i, int32_t) {
+        int8_t vra_1_val = get_simd_register_by_lane<int8_t>(vra, 4 * i),
+               vra_2_val = get_simd_register_by_lane<int8_t>(vra, (4 * i) + 1),
+               vra_3_val = get_simd_register_by_lane<int8_t>(vra, (4 * i) + 2),
+               vra_4_val = get_simd_register_by_lane<int8_t>(vra, (4 * i) + 3);
+        uint8_t vrb_1_val = get_simd_register_by_lane<uint8_t>(vrb, 4 * i),
+                vrb_2_val =
+                    get_simd_register_by_lane<uint8_t>(vrb, (4 * i) + 1),
+                vrb_3_val =
+                    get_simd_register_by_lane<uint8_t>(vrb, (4 * i) + 2),
+                vrb_4_val =
+                    get_simd_register_by_lane<uint8_t>(vrb, (4 * i) + 3);
+        int32_t vrc_val = get_simd_register_by_lane<int32_t>(vrc, i);
+        int32_t temp1 = vra_1_val * vrb_1_val, temp2 = vra_2_val * vrb_2_val,
+                temp3 = vra_3_val * vrb_3_val, temp4 = vra_4_val * vrb_4_val;
+        temp1 = temp1 + temp2 + temp3 + temp4 + vrc_val;
+        set_simd_register_by_lane<int32_t>(vrt, i, temp1);
+      }
+      break;
+    }
+    case VMSUMSHM: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      FOR_EACH_LANE(i, int32_t) {
+        int16_t vra_1_val = get_simd_register_by_lane<int16_t>(vra, 2 * i);
+        int16_t vra_2_val =
+            get_simd_register_by_lane<int16_t>(vra, (2 * i) + 1);
+        int16_t vrb_1_val = get_simd_register_by_lane<int16_t>(vrb, 2 * i);
+        int16_t vrb_2_val =
+            get_simd_register_by_lane<int16_t>(vrb, (2 * i) + 1);
+        int32_t vrc_val = get_simd_register_by_lane<int32_t>(vrc, i);
+        int32_t temp1 = vra_1_val * vrb_1_val, temp2 = vra_2_val * vrb_2_val;
+        temp1 = temp1 + temp2 + vrc_val;
+        set_simd_register_by_lane<int32_t>(vrt, i, temp1);
+      }
+      break;
+    }
+    case VMLADDUHM: {
+      int vrt = instr->RTValue();
+      int vra = instr->RAValue();
+      int vrb = instr->RBValue();
+      int vrc = instr->RCValue();
+      FOR_EACH_LANE(i, uint16_t) {
+        uint16_t vra_val = get_simd_register_by_lane<uint16_t>(vra, i);
+        uint16_t vrb_val = get_simd_register_by_lane<uint16_t>(vrb, i);
+        uint16_t vrc_val = get_simd_register_by_lane<uint16_t>(vrc, i);
+        set_simd_register_by_lane<uint16_t>(vrt, i,
+                                            (vra_val * vrb_val) + vrc_val);
+      }
+      break;
+    }
+#define VECTOR_UNARY_OP(type, op)                         \
+  int t = instr->RTValue();                               \
+  int b = instr->RBValue();                               \
+  FOR_EACH_LANE(i, type) {                                \
+    set_simd_register_by_lane<type>(                      \
+        t, i, op(get_simd_register_by_lane<type>(b, i))); \
+  }
+    case XVABSDP: {
+      VECTOR_UNARY_OP(double, std::abs)
+      break;
+    }
+    case XVNEGDP: {
+      VECTOR_UNARY_OP(double, -)
+      break;
+    }
+    case XVSQRTDP: {
+      VECTOR_UNARY_OP(double, std::sqrt)
+      break;
+    }
+    case XVABSSP: {
+      VECTOR_UNARY_OP(float, std::abs)
+      break;
+    }
+    case XVNEGSP: {
+      VECTOR_UNARY_OP(float, -)
+      break;
+    }
+    case XVSQRTSP: {
+      VECTOR_UNARY_OP(float, std::sqrt)
+      break;
+    }
+    case XVRESP: {
+      VECTOR_UNARY_OP(float, base::Recip)
+      break;
+    }
+    case XVRSQRTESP: {
+      VECTOR_UNARY_OP(float, base::RecipSqrt)
+      break;
+    }
+    case VNEGW: {
+      VECTOR_UNARY_OP(int32_t, -)
+      break;
+    }
+    case VNEGD: {
+      VECTOR_UNARY_OP(int64_t, -)
+      break;
+    }
+#undef VECTOR_UNARY_OP
+#define VECTOR_ROUNDING_AVERAGE(intermediate_type, result_type)              \
+  DECODE_VX_INSTRUCTION(t, a, b, T)                                          \
+  FOR_EACH_LANE(i, result_type) {                                            \
+    intermediate_type a_val = static_cast<intermediate_type>(                \
+        get_simd_register_by_lane<result_type>(a, i));                       \
+    intermediate_type b_val = static_cast<intermediate_type>(                \
+        get_simd_register_by_lane<result_type>(b, i));                       \
+    intermediate_type t_val = ((a_val + b_val) + 1) >> 1;                    \
+    set_simd_register_by_lane<result_type>(t, i,                             \
+                                           static_cast<result_type>(t_val)); \
+  }
+    case VAVGUH: {
+      VECTOR_ROUNDING_AVERAGE(uint32_t, uint16_t)
+      break;
+    }
+    case VAVGUB: {
+      VECTOR_ROUNDING_AVERAGE(uint16_t, uint8_t)
+      break;
+    }
+#undef VECTOR_ROUNDING_AVERAGE
+    case VPOPCNTB: {
+      int t = instr->RTValue();
+      int b = instr->RBValue();
+      FOR_EACH_LANE(i, uint8_t) {
+        set_simd_register_by_lane<uint8_t>(
+            t, i,
+            base::bits::CountPopulation(
+                get_simd_register_by_lane<uint8_t>(b, i)));
+      }
+      break;
+    }
+#define EXTRACT_MASK(type)                                           \
+  int rt = instr->RTValue();                                         \
+  int vrb = instr->RBValue();                                        \
+  uint64_t result = 0;                                               \
+  FOR_EACH_LANE(i, type) {                                           \
+    if (i > 0) result <<= 1;                                         \
+    result |= std::signbit(get_simd_register_by_lane<type>(vrb, i)); \
+  }                                                                  \
+  set_register(rt, result);
+    case VEXTRACTDM: {
+      EXTRACT_MASK(int64_t)
+      break;
+    }
+    case VEXTRACTWM: {
+      EXTRACT_MASK(int32_t)
+      break;
+    }
+    case VEXTRACTHM: {
+      EXTRACT_MASK(int16_t)
+      break;
+    }
+    case VEXTRACTBM: {
+      EXTRACT_MASK(int8_t)
+      break;
+    }
+#undef EXTRACT_MASK
+#undef FOR_EACH_LANE
+#undef DECODE_VX_INSTRUCTION
+#undef GET_ADDRESS
+    default: {
+      UNIMPLEMENTED();
+    }
+  }
+}
 
 void Simulator::Trace(Instruction* instr) {
   disasm::NameConverter converter;
   disasm::Disassembler dasm(converter);
   // use a reasonably large buffer
-  v8::internal::EmbeddedVector<char, 256> buffer;
-  dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(instr));
+  v8::base::EmbeddedVector<char, 256> buffer;
+  dasm.InstructionDecode(buffer, reinterpret_cast<uint8_t*>(instr));
   PrintF("%05d  %08" V8PRIxPTR "  %s\n", icount_,
          reinterpret_cast<intptr_t>(instr), buffer.begin());
 }
 
 // Executes the current instruction.
 void Simulator::ExecuteInstruction(Instruction* instr) {
-  if (v8::internal::FLAG_check_icache) {
+  if (v8_flags.check_icache) {
     CheckICache(i_cache(), instr);
   }
   pc_modified_ = false;
-  if (::v8::internal::FLAG_trace_sim) {
+  if (InstructionTracingEnabled()) {
     Trace(instr);
   }
   uint32_t opcode = instr->OpcodeField();
@@ -4202,7 +5425,7 @@ void Simulator::Execute() {
   // raw PC value and not the one used as input to arithmetic instructions.
   intptr_t program_counter = get_pc();
 
-  if (::v8::internal::FLAG_stop_sim_at == 0) {
+  if (v8_flags.stop_sim_at == 0) {
     // Fast version of the dispatch loop without checking whether the simulator
     // should be stopping at a particular executed instruction.
     while (program_counter != end_sim_pc) {
@@ -4212,12 +5435,12 @@ void Simulator::Execute() {
       program_counter = get_pc();
     }
   } else {
-    // FLAG_stop_sim_at is at the non-default value. Stop in the debugger when
-    // we reach the particular instruction count.
+    // v8_flags.stop_sim_at is at the non-default value. Stop in the debugger
+    // when we reach the particular instruction count.
     while (program_counter != end_sim_pc) {
       Instruction* instr = reinterpret_cast<Instruction*>(program_counter);
       icount_++;
-      if (icount_ == ::v8::internal::FLAG_stop_sim_at) {
+      if (icount_ == v8_flags.stop_sim_at) {
         PPCDebugger dbg(this);
         dbg.Debug();
       } else {
@@ -4373,8 +5596,8 @@ intptr_t Simulator::CallImpl(Address entry, int argument_count,
   // +2 is a hack for the LR slot + old SP on PPC
   intptr_t* stack_argument =
       reinterpret_cast<intptr_t*>(entry_stack) + kStackFrameExtraParamSlot;
-  base::Memcpy(stack_argument, arguments + reg_arg_count,
-               stack_arg_count * sizeof(*arguments));
+  memcpy(stack_argument, arguments + reg_arg_count,
+         stack_arg_count * sizeof(*arguments));
   set_register(sp, entry_stack);
 
   CallInternal(entry);

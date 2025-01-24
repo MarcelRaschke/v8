@@ -85,8 +85,8 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
                  InstructionSelector::SourcePositionMode source_position_mode =
                      InstructionSelector::kAllSourcePositions);
 
-    const FrameStateFunctionInfo* GetFrameStateFunctionInfo(int parameter_count,
-                                                            int local_count);
+    const FrameStateFunctionInfo* GetFrameStateFunctionInfo(
+        uint16_t parameter_count, int local_count);
 
     // Create a simple call descriptor for testing.
     static CallDescriptor* MakeSimpleCallDescriptor(Zone* zone,
@@ -115,17 +115,18 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
                             kSystemPointerSize);
       }
 
-      const RegList kCalleeSaveRegisters = 0;
-      const RegList kCalleeSaveFPRegisters = 0;
+      const RegList kCalleeSaveRegisters;
+      const DoubleRegList kCalleeSaveFPRegisters;
 
       MachineType target_type = MachineType::Pointer();
       LinkageLocation target_loc = LinkageLocation::ForAnyRegister();
 
       return zone->New<CallDescriptor>(  // --
           CallDescriptor::kCallAddress,  // kind
+          kDefaultCodeEntrypointTag,     // tag
           target_type,                   // target MachineType
           target_loc,                    // target location
-          locations.Build(),             // location_sig
+          locations.Get(),               // location_sig
           0,                             // stack_parameter_count
           Operator::kNoProperties,       // properties
           kCalleeSaveRegisters,          // callee-saved registers
@@ -138,7 +139,7 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
     CallDescriptor* MakeCallDescriptor(Zone* zone, MachineType return_type) {
       MachineSignature::Builder builder(zone, 1, 0);
       builder.AddReturn(return_type);
-      return MakeSimpleCallDescriptor(zone, builder.Build());
+      return MakeSimpleCallDescriptor(zone, builder.Get());
     }
 
     CallDescriptor* MakeCallDescriptor(Zone* zone, MachineType return_type,
@@ -146,7 +147,7 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
       MachineSignature::Builder builder(zone, 1, 1);
       builder.AddReturn(return_type);
       builder.AddParam(parameter0_type);
-      return MakeSimpleCallDescriptor(zone, builder.Build());
+      return MakeSimpleCallDescriptor(zone, builder.Get());
     }
 
     CallDescriptor* MakeCallDescriptor(Zone* zone, MachineType return_type,
@@ -156,7 +157,7 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
       builder.AddReturn(return_type);
       builder.AddParam(parameter0_type);
       builder.AddParam(parameter1_type);
-      return MakeSimpleCallDescriptor(zone, builder.Build());
+      return MakeSimpleCallDescriptor(zone, builder.Get());
     }
 
     CallDescriptor* MakeCallDescriptor(Zone* zone, MachineType return_type,
@@ -168,7 +169,7 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
       builder.AddParam(parameter0_type);
       builder.AddParam(parameter1_type);
       builder.AddParam(parameter2_type);
-      return MakeSimpleCallDescriptor(zone, builder.Build());
+      return MakeSimpleCallDescriptor(zone, builder.Get());
     }
 
     InstructionSelectorTest* test_;
@@ -218,7 +219,8 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
       return ToConstant(operand).ToInt64();
     }
 
-    Handle<HeapObject> ToHeapObject(const InstructionOperand* operand) const {
+    DirectHandle<HeapObject> ToHeapObject(
+        const InstructionOperand* operand) const {
       return ToConstant(operand).ToHeapObject();
     }
 
@@ -234,6 +236,8 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
 
     bool IsFixed(const InstructionOperand* operand, Register reg) const;
     bool IsSameAsFirst(const InstructionOperand* operand) const;
+    bool IsSameAsInput(const InstructionOperand* operand,
+                       int input_index) const;
     bool IsUsedAtStart(const InstructionOperand* operand) const;
 
     FrameStateDescriptor* GetFrameStateDescriptor(int deoptimization_id) {
@@ -267,8 +271,10 @@ class InstructionSelectorTest : public TestWithNativeContextAndZone {
       } else {
         EXPECT_EQ(InstructionOperand::IMMEDIATE, operand->kind());
         auto imm = ImmediateOperand::cast(operand);
-        if (imm->type() == ImmediateOperand::INLINE) {
-          return Constant(imm->inline_value());
+        if (imm->type() == ImmediateOperand::INLINE_INT32) {
+          return Constant(imm->inline_int32_value());
+        } else if (imm->type() == ImmediateOperand::INLINE_INT64) {
+          return Constant(imm->inline_int64_value());
         }
         i = immediates_.find(imm->indexed_value());
         EXPECT_EQ(imm->indexed_value(), i->first);

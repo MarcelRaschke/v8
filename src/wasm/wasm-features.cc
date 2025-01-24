@@ -3,33 +3,59 @@
 // found in the LICENSE file.
 
 #include "src/wasm/wasm-features.h"
-#include "src/execution/isolate.h"
+
+#include "src/execution/isolate-inl.h"
 #include "src/flags/flags.h"
 #include "src/handles/handles-inl.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
 namespace wasm {
 
 // static
-WasmFeatures WasmFeatures::FromFlags() {
-  WasmFeatures features = WasmFeatures::None();
-#define FLAG_REF(feat, ...) \
-  if (FLAG_experimental_wasm_##feat) features.Add(kFeature_##feat);
-  FOREACH_WASM_FEATURE(FLAG_REF)
-#undef FLAG_REF
+WasmEnabledFeatures WasmEnabledFeatures::FromFlags() {
+  WasmEnabledFeatures features = WasmEnabledFeatures::None();
+
+#if V8_ENABLE_DRUMBRAKE
+  // DrumBrake supports only a subset or older versions of some Wasm features.
+  if (v8_flags.wasm_jitless) {
+    features.Add(WasmEnabledFeature::legacy_eh);
+    if (v8_flags.experimental_wasm_memory64) {
+      features.Add(WasmEnabledFeature::memory64);
+    }
+  }
+#endif  // V8_ENABLE_DRUMBRAKE
+
+#define CHECK_FEATURE_FLAG(feat, ...)                              \
+  if (!v8_flags.wasm_jitless && v8_flags.experimental_wasm_##feat) \
+    features.Add(WasmEnabledFeature::feat);
+  FOREACH_WASM_FEATURE_FLAG(CHECK_FEATURE_FLAG)
+#undef CHECK_FEATURE_FLAG
   return features;
 }
 
 // static
-WasmFeatures WasmFeatures::FromIsolate(Isolate* isolate) {
-  WasmFeatures features = WasmFeatures::FromFlags();
-  if (isolate->IsWasmSimdEnabled(handle(isolate->context(), isolate))) {
-    features.Add(kFeature_simd);
+WasmEnabledFeatures WasmEnabledFeatures::FromIsolate(Isolate* isolate) {
+  return FromContext(isolate, isolate->native_context());
+}
+
+// static
+WasmEnabledFeatures WasmEnabledFeatures::FromContext(
+    Isolate* isolate, DirectHandle<NativeContext> context) {
+  WasmEnabledFeatures features = WasmEnabledFeatures::FromFlags();
+  if (!v8_flags.wasm_jitless) {
+    if (isolate->IsWasmStringRefEnabled(context)) {
+      features.Add(WasmEnabledFeature::stringref);
+    }
+    if (isolate->IsWasmImportedStringsEnabled(context)) {
+      features.Add(WasmEnabledFeature::imported_strings);
+    }
+    if (isolate->IsWasmJSPIEnabled(context)) {
+      features.Add(WasmEnabledFeature::jspi);
+    }
   }
-  if (isolate->AreWasmExceptionsEnabled(handle(isolate->context(), isolate))) {
-    features.Add(kFeature_eh);
-  }
+  // This space intentionally left blank for future Wasm origin trials.
   return features;
 }
 

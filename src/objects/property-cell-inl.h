@@ -5,10 +5,10 @@
 #ifndef V8_OBJECTS_PROPERTY_CELL_INL_H_
 #define V8_OBJECTS_PROPERTY_CELL_INL_H_
 
-#include "src/objects/property-cell.h"
-
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/objects/code-inl.h"
+#include "src/objects/dependent-code-inl.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property-cell.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -16,24 +16,26 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(PropertyCell, HeapObject)
+#include "torque-generated/src/objects/property-cell-tq-inl.inc"
 
-CAST_ACCESSOR(PropertyCell)
+TQ_OBJECT_CONSTRUCTORS_IMPL(PropertyCell)
 
-ACCESSORS(PropertyCell, dependent_code, DependentCode, kDependentCodeOffset)
-ACCESSORS(PropertyCell, name, Name, kNameOffset)
-ACCESSORS(PropertyCell, property_details_raw, Smi, kPropertyDetailsRawOffset)
-RELEASE_ACQUIRE_ACCESSORS(PropertyCell, property_details_raw, Smi,
+ACCESSORS(PropertyCell, dependent_code, Tagged<DependentCode>,
+          kDependentCodeOffset)
+ACCESSORS(PropertyCell, name, Tagged<Name>, kNameOffset)
+ACCESSORS(PropertyCell, property_details_raw, Tagged<Smi>,
+          kPropertyDetailsRawOffset)
+RELEASE_ACQUIRE_ACCESSORS(PropertyCell, property_details_raw, Tagged<Smi>,
                           kPropertyDetailsRawOffset)
-ACCESSORS(PropertyCell, value, Object, kValueOffset)
-RELEASE_ACQUIRE_ACCESSORS(PropertyCell, value, Object, kValueOffset)
+ACCESSORS(PropertyCell, value, Tagged<Object>, kValueOffset)
+RELEASE_ACQUIRE_ACCESSORS(PropertyCell, value, Tagged<Object>, kValueOffset)
 
 PropertyDetails PropertyCell::property_details() const {
-  return PropertyDetails(Smi::cast(property_details_raw()));
+  return PropertyDetails(Cast<Smi>(property_details_raw()));
 }
 
 PropertyDetails PropertyCell::property_details(AcquireLoadTag tag) const {
-  return PropertyDetails(Smi::cast(property_details_raw(tag)));
+  return PropertyDetails(Cast<Smi>(property_details_raw(tag)));
 }
 
 void PropertyCell::UpdatePropertyDetailsExceptCellType(
@@ -47,18 +49,36 @@ void PropertyCell::UpdatePropertyDetailsExceptCellType(
   // unless the property is also configurable, in which case it will stay
   // read-only forever.
   if (!old_details.IsReadOnly() && details.IsReadOnly()) {
-    dependent_code().DeoptimizeDependentCodeGroup(
-        DependentCode::kPropertyCellChangedGroup);
+    // TODO(11527): pass Isolate as an argument.
+    Isolate* isolate = GetIsolateFromWritableObject(*this);
+    DependentCode::DeoptimizeDependencyGroups(
+        isolate, *this, DependentCode::kPropertyCellChangedGroup);
   }
 }
 
 void PropertyCell::Transition(PropertyDetails new_details,
-                              Handle<Object> new_value) {
+                              DirectHandle<Object> new_value) {
   DCHECK(CanTransitionTo(new_details, *new_value));
   // This code must be in sync with its counterpart in
   // PropertyCellData::Serialize.
+  PropertyDetails transition_marker = new_details;
+  transition_marker.set_cell_type(PropertyCellType::kInTransition);
+  set_property_details_raw(transition_marker.AsSmi(), kReleaseStore);
   set_value(*new_value, kReleaseStore);
   set_property_details_raw(new_details.AsSmi(), kReleaseStore);
+}
+
+TQ_OBJECT_CONSTRUCTORS_IMPL(ContextSidePropertyCell)
+
+RELEASE_ACQUIRE_ACCESSORS(ContextSidePropertyCell, context_side_property_raw,
+                          Tagged<Smi>, kPropertyDetailsRawOffset)
+
+ACCESSORS(ContextSidePropertyCell, dependent_code, Tagged<DependentCode>,
+          kDependentCodeOffset)
+
+ContextSidePropertyCell::Property
+ContextSidePropertyCell::context_side_property() const {
+  return FromSmi(context_side_property_raw(kAcquireLoad));
 }
 
 }  // namespace internal

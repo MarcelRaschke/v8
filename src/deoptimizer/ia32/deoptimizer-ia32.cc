@@ -9,19 +9,29 @@
 namespace v8 {
 namespace internal {
 
-const bool Deoptimizer::kSupportsFixedDeoptExitSizes = true;
-const int Deoptimizer::kNonLazyDeoptExitSize = 5;
+const int Deoptimizer::kEagerDeoptExitSize = 5;
 const int Deoptimizer::kLazyDeoptExitSize = 5;
-const int Deoptimizer::kEagerWithResumeBeforeArgsSize = 10;
-const int Deoptimizer::kEagerWithResumeDeoptExitSize =
-    kEagerWithResumeBeforeArgsSize + 2 * kSystemPointerSize;
-const int Deoptimizer::kEagerWithResumeImmedArgs1PcOffset = 5;
-const int Deoptimizer::kEagerWithResumeImmedArgs2PcOffset =
-    5 + kSystemPointerSize;
+
+const int Deoptimizer::kAdaptShadowStackOffsetToSubtract = 0;
+
+// static
+void Deoptimizer::PatchToJump(Address pc, Address new_pc) { UNREACHABLE(); }
 
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
-  return Float32::FromBits(
-      static_cast<uint32_t>(double_registers_[n].get_bits()));
+  return base::ReadUnalignedValue<Float32>(
+      reinterpret_cast<Address>(simd128_registers_ + n));
+}
+
+Float64 RegisterValues::GetDoubleRegister(unsigned n) const {
+  V8_ASSUME(n < arraysize(simd128_registers_));
+  return base::ReadUnalignedValue<Float64>(
+      reinterpret_cast<Address>(simd128_registers_ + n));
+}
+
+void RegisterValues::SetDoubleRegister(unsigned n, Float64 value) {
+  V8_ASSUME(n < arraysize(simd128_registers_));
+  base::WriteUnalignedValue(reinterpret_cast<Address>(simd128_registers_ + n),
+                            value);
 }
 
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {

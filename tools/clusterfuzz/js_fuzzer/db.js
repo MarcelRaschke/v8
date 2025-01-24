@@ -11,11 +11,17 @@ const fs = require('fs');
 const fsPath = require('path');
 
 const babelGenerator = require('@babel/generator').default;
+const babelTemplate = require('@babel/template').default;
 const babelTraverse = require('@babel/traverse').default;
 const babelTypes = require('@babel/types');
 const globals = require('globals');
 
 const random = require('./random.js');
+const sourceHelpers = require('./source_helpers.js');
+
+// The probabiliy to choose a snippet with the super keyword in places
+// where it can be inserted.
+const CHOOSE_SUPER_PROB = 0.2;
 
 const globalIdentifiers = new Set(Object.keys(globals.builtin));
 const propertyNames = new Set([
@@ -238,6 +244,29 @@ function _markSkipped(path) {
   }
 }
 
+/**
+ * Returns true if an expression can be applied or false otherwise.
+ */
+function isValid(expression) {
+  const expressionTemplate = babelTemplate(
+      expression.source,
+      sourceHelpers.BABYLON_REPLACE_VAR_OPTIONS);
+
+  const dependencies = {};
+  if (expression.dependencies) {
+    for (const dependency of expression.dependencies) {
+      dependencies[dependency] = babelTypes.identifier('__v_0');
+    }
+  }
+
+  try {
+    expressionTemplate(dependencies);
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
 class MutateDbWriter {
   constructor(outputDir) {
     this.seen = new Set();
@@ -393,6 +422,11 @@ class MutateDbWriter {
           return;
         }
 
+        // Test results.
+        if (!isValid(expression)) {
+          return;
+        }
+
         // Write results.
         let dirPath = fsPath.join(self.outputDir, expression.type);
         if (!fs.existsSync(dirPath)) {
@@ -437,8 +471,8 @@ class MutateDb {
   getRandomStatement({canHaveSuper=false} = {}) {
     let choices;
     if (canHaveSuper) {
-      choices = random.randInt(0, 1) ?
-          this.index.all : this.index.superStatements;
+      choices = random.choose(CHOOSE_SUPER_PROB) ?
+          this.index.superStatements : this.index.all;
     } else {
       choices = this.index.statements;
     }

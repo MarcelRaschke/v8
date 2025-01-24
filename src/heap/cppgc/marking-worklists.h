@@ -41,7 +41,7 @@ class MarkingWorklists {
     void operator delete(void*) = delete;
     void operator delete[](void*) = delete;
 
-    v8::base::Mutex lock_;
+    v8::base::SpinningMutex lock_;
     std::unordered_set<HeapObjectHeader*> objects_;
   };
 
@@ -76,6 +76,8 @@ class MarkingWorklists {
       heap::base::Worklist<HeapObjectHeader*, 16 /* local entries */>;
   using WeakCallbackWorklist =
       heap::base::Worklist<WeakCallbackItem, 64 /* local entries */>;
+  using WeakCustomCallbackWorklist =
+      heap::base::Worklist<WeakCallbackItem, 16 /* local entries */>;
   using WriteBarrierWorklist =
       heap::base::Worklist<HeapObjectHeader*, 64 /*local entries */>;
   using ConcurrentMarkingBailoutWorklist =
@@ -84,6 +86,8 @@ class MarkingWorklists {
   using EphemeronPairsWorklist =
       heap::base::Worklist<EphemeronPairItem, 64 /* local entries */>;
   using WeakContainersWorklist = ExternalMarkingWorklist;
+  using RetraceMarkedObjectsWorklist =
+      heap::base::Worklist<HeapObjectHeader*, 16 /* local entries */>;
 
   MarkingWorklist* marking_worklist() { return &marking_worklist_; }
   NotFullyConstructedWorklist* not_fully_constructed_worklist() {
@@ -96,8 +100,18 @@ class MarkingWorklists {
   WriteBarrierWorklist* write_barrier_worklist() {
     return &write_barrier_worklist_;
   }
-  WeakCallbackWorklist* weak_callback_worklist() {
-    return &weak_callback_worklist_;
+  WeakCallbackWorklist* weak_container_callback_worklist() {
+    return &weak_container_callback_worklist_;
+  }
+  WeakCallbackWorklist* parallel_weak_callback_worklist() {
+    return &parallel_weak_callback_worklist_;
+  }
+  WeakCustomCallbackWorklist* weak_custom_callback_worklist() {
+    return &weak_custom_callback_worklist_;
+  }
+  const ConcurrentMarkingBailoutWorklist* concurrent_marking_bailout_worklist()
+      const {
+    return &concurrent_marking_bailout_worklist_;
   }
   ConcurrentMarkingBailoutWorklist* concurrent_marking_bailout_worklist() {
     return &concurrent_marking_bailout_worklist_;
@@ -111,6 +125,9 @@ class MarkingWorklists {
   WeakContainersWorklist* weak_containers_worklist() {
     return &weak_containers_worklist_;
   }
+  RetraceMarkedObjectsWorklist* retrace_marked_objects_worklist() {
+    return &retrace_marked_objects_worklist_;
+  }
 
   void ClearForTesting();
 
@@ -120,26 +137,34 @@ class MarkingWorklists {
   PreviouslyNotFullyConstructedWorklist
       previously_not_fully_constructed_worklist_;
   WriteBarrierWorklist write_barrier_worklist_;
-  WeakCallbackWorklist weak_callback_worklist_;
+  // Hold weak callbacks for weak containers (e.g. containers with WeakMembers).
+  WeakCallbackWorklist weak_container_callback_worklist_;
+  // Hold weak custom callbacks (e.g. for containers with UntracedMembers).
+  WeakCustomCallbackWorklist weak_custom_callback_worklist_;
+  // Hold weak callbacks which can invoke on main or worker thread (used for
+  // regular WeakMember).
+  WeakCallbackWorklist parallel_weak_callback_worklist_;
   ConcurrentMarkingBailoutWorklist concurrent_marking_bailout_worklist_;
   EphemeronPairsWorklist discovered_ephemeron_pairs_worklist_;
   EphemeronPairsWorklist ephemeron_pairs_for_processing_worklist_;
   WeakContainersWorklist weak_containers_worklist_;
+  RetraceMarkedObjectsWorklist retrace_marked_objects_worklist_;
 };
 
 template <>
 struct MarkingWorklists::ExternalMarkingWorklist::ConditionalMutexGuard<
     AccessMode::kNonAtomic> {
-  explicit ConditionalMutexGuard(v8::base::Mutex*) {}
+  explicit ConditionalMutexGuard(v8::base::SpinningMutex*) {}
 };
 
 template <>
 struct MarkingWorklists::ExternalMarkingWorklist::ConditionalMutexGuard<
     AccessMode::kAtomic> {
-  explicit ConditionalMutexGuard(v8::base::Mutex* lock) : guard_(lock) {}
+  explicit ConditionalMutexGuard(v8::base::SpinningMutex* lock)
+      : guard_(lock) {}
 
  private:
-  v8::base::MutexGuard guard_;
+  v8::base::SpinningMutexGuard guard_;
 };
 
 template <AccessMode mode>

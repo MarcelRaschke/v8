@@ -3,12 +3,13 @@
 // found in the LICENSE file.
 
 #include "test/unittests/compiler/graph-reducer-unittest.h"
+
 #include "src/codegen/tick-counter.h"
 #include "src/compiler/common-operator.h"
-#include "src/compiler/graph.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/node.h"
 #include "src/compiler/operator.h"
+#include "src/compiler/turbofan-graph.h"
 #include "test/unittests/test-utils.h"
 
 using testing::_;
@@ -413,14 +414,14 @@ class GraphReducerTest : public TestWithZone {
  public:
   GraphReducerTest() : TestWithZone(kCompressGraphZone), graph_(zone()) {}
 
-  static void SetUpTestCase() {
-    TestWithZone::SetUpTestCase();
+  static void SetUpTestSuite() {
+    TestWithZone::SetUpTestSuite();
     DefaultValue<Reduction>::Set(Reducer::NoChange());
   }
 
-  static void TearDownTestCase() {
+  static void TearDownTestSuite() {
     DefaultValue<Reduction>::Clear();
-    TestWithZone::TearDownTestCase();
+    TestWithZone::TearDownTestSuite();
   }
 
  protected:
@@ -712,7 +713,7 @@ TEST_F(GraphReducerTest, Forwarding3) {
 
     A1Forwarder r;
 
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t j = 0; j < 3; j++) {
       size_t before = graph()->NodeCount();
       ReduceGraph(&r);
       EXPECT_EQ(before, graph()->NodeCount());

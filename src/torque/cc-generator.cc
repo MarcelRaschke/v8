@@ -4,17 +4,17 @@
 
 #include "src/torque/cc-generator.h"
 
+#include <optional>
+
 #include "src/common/globals.h"
 #include "src/torque/global-context.h"
 #include "src/torque/type-oracle.h"
 #include "src/torque/types.h"
 #include "src/torque/utils.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
-base::Optional<Stack<std::string>> CCGenerator::EmitGraph(
+std::optional<Stack<std::string>> CCGenerator::EmitGraph(
     Stack<std::string> parameters) {
   for (BottomOffset i = {0}; i < parameters.AboveTop(); ++i) {
     SetDefinitionVariable(DefinitionLocation::Parameter(i.offset),
@@ -35,7 +35,7 @@ base::Optional<Stack<std::string>> CCGenerator::EmitGraph(
     EmitBlock(block);
   }
 
-  base::Optional<Stack<std::string>> result;
+  std::optional<Stack<std::string>> result;
   if (cfg_.end()) {
     result = EmitBlock(*cfg_.end());
   }
@@ -105,7 +105,6 @@ std::vector<std::string> CCGenerator::ProcessArgumentsCommon(
   std::vector<std::string> args;
   for (auto it = parameter_types.rbegin(); it != parameter_types.rend(); ++it) {
     const Type* type = *it;
-    VisitResult arg;
     if (type->IsConstexpr()) {
       args.push_back(std::move(constexpr_arguments.back()));
       constexpr_arguments.pop_back();
@@ -329,10 +328,9 @@ void CCGenerator::EmitInstruction(const ReturnInstruction& instruction,
   ReportError("Not supported in C++ output: Return");
 }
 
-void CCGenerator::EmitInstruction(
-    const PrintConstantStringInstruction& instruction,
-    Stack<std::string>* stack) {
-  out() << "  std::cout << " << StringLiteralQuote(instruction.message)
+void CCGenerator::EmitInstruction(const PrintErrorInstruction& instruction,
+                                  Stack<std::string>* stack) {
+  out() << "  std::cerr << " << StringLiteralQuote(instruction.message)
         << ";\n";
 }
 
@@ -386,25 +384,45 @@ void CCGenerator::EmitInstruction(const LoadReferenceInstruction& instruction,
     out() << "  " << result_name << " = ";
     if (instruction.type->IsSubtypeOf(TypeOracle::GetTaggedType())) {
       // Currently, all of the tagged loads we emit are for smi values, so there
-      // is no point in providing an IsolateRoot. If at some point we start
+      // is no point in providing an PtrComprCageBase. If at some point we start
       // emitting loads for tagged fields which might be HeapObjects, then we
-      // should plumb an IsolateRoot through the generated functions that need
-      // it.
+      // should plumb an PtrComprCageBase through the generated functions that
+      // need it.
       if (!instruction.type->IsSubtypeOf(TypeOracle::GetSmiType())) {
         Error(
             "Not supported in C++ output: LoadReference on non-smi tagged "
             "value");
       }
-
+      if (instruction.synchronization != FieldSynchronization::kNone) {
+        // TODO(ishell): generate proper TaggedField<..>::load() call once
+        // there's a real use case.
+        ReportError(
+            "Torque doesn't support @cppRelaxedLoad/@cppAcquireLoad on tagged "
+            "data");
+      }
       // References and slices can cause some values to have the Torque type
       // HeapObject|TaggedZeroPattern, which is output as "Object". TaggedField
       // requires HeapObject, so we need a cast.
       out() << "TaggedField<" << result_type
-            << ">::load(*static_cast<HeapObject*>(&" << object
+            << ">::load(UncheckedCast<HeapObject>(" << object
             << "), static_cast<int>(" << offset << "));\n";
     } else {
-      out() << "(" << object << ").ReadField<" << result_type << ">(" << offset
-            << ");\n";
+      // This code replicates the way we load the field in accessors, see
+      // CppClassGenerator::EmitLoadFieldStatement().
+      const char* load;
+      switch (instruction.synchronization) {
+        case FieldSynchronization::kNone:
+          load = "ReadField";
+          break;
+        case FieldSynchronization::kRelaxed:
+          load = "Relaxed_ReadField";
+          break;
+        case FieldSynchronization::kAcquireRelease:
+          ReportError(
+              "Torque doesn't support @cppAcquireLoad on untagged data");
+      }
+      out() << "(" << object << ")->" << load << "<" << result_type << ">("
+            << offset << ");\n";
     }
   } else {
     std::string result_type = instruction.type->GetDebugType();
@@ -450,7 +468,7 @@ void CCGenerator::EmitInstruction(const LoadBitFieldInstruction& instruction,
   decls() << "  " << instruction.bit_field.name_and_type.type->GetRuntimeType()
           << " " << result_name << "{}; USE(" << result_name << ");\n";
 
-  base::Optional<const Type*> smi_tagged_type =
+  std::optional<const Type*> smi_tagged_type =
       Type::MatchUnaryGeneric(struct_type, TypeOracle::GetSmiTaggedGeneric());
   if (smi_tagged_type) {
     // Get the untagged value and its type.
@@ -472,36 +490,39 @@ void CCGenerator::EmitInstruction(const StoreBitFieldInstruction& instruction,
   ReportError("Not supported in C++ output: StoreBitField");
 }
 
+namespace {
+
+void CollectAllFields(const VisitResult& result,
+                      const Stack<std::string>& values,
+                      std::vector<std::string>& all_fields) {
+  if (!result.IsOnStack()) {
+    all_fields.push_back(result.constexpr_value());
+  } else if (auto struct_type = result.type()->StructSupertype()) {
+    for (const Field& field : (*struct_type)->fields()) {
+      CollectAllFields(ProjectStructField(result, field.name_and_type.name),
+                       values, all_fields);
+    }
+  } else {
+    DCHECK_EQ(1, result.stack_range().Size());
+    all_fields.push_back(values.Peek(result.stack_range().begin()));
+  }
+}
+
+}  // namespace
+
 // static
 void CCGenerator::EmitCCValue(VisitResult result,
                               const Stack<std::string>& values,
                               std::ostream& out) {
-  if (!result.IsOnStack()) {
-    out << result.constexpr_value();
-  } else if (auto struct_type = result.type()->StructSupertype()) {
-    out << "std::tuple_cat(";
-    bool first = true;
-    for (auto& field : (*struct_type)->fields()) {
-      if (!first) {
-        out << ", ";
-      }
-      first = false;
-      if (!field.name_and_type.type->IsStructType()) {
-        out << "std::make_tuple(";
-      }
-      EmitCCValue(ProjectStructField(result, field.name_and_type.name), values,
-                  out);
-      if (!field.name_and_type.type->IsStructType()) {
-        out << ")";
-      }
-    }
-    out << ")";
+  std::vector<std::string> all_fields;
+  CollectAllFields(result, values, all_fields);
+  if (all_fields.size() == 1) {
+    out << all_fields[0];
   } else {
-    DCHECK_EQ(1, result.stack_range().Size());
-    out << values.Peek(result.stack_range().begin());
+    out << "std::make_tuple(";
+    PrintCommaSeparatedList(out, all_fields);
+    out << ")";
   }
 }
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque

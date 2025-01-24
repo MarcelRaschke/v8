@@ -5,9 +5,9 @@
 #ifndef V8_COMPILER_TYPE_CACHE_H_
 #define V8_COMPILER_TYPE_CACHE_H_
 
-#include "src/compiler/types.h"
+#include "src/compiler/globals.h"
+#include "src/compiler/turbofan-types.h"
 #include "src/date/date.h"
-#include "src/objects/code.h"
 #include "src/objects/js-array-buffer.h"
 #include "src/objects/string.h"
 
@@ -36,13 +36,17 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kUnsigned31 = Type::Unsigned31();
   Type const kInt32 = Type::Signed32();
   Type const kUint32 = Type::Unsigned32();
-  Type const kInt64 = CreateRange<int64_t>();
-  Type const kUint64 = CreateRange<uint64_t>();
-  Type const kIntPtr = CreateRange<intptr_t>();
+  Type const kDoubleRepresentableInt64 = CreateRange(
+      std::numeric_limits<int64_t>::min(), kMaxDoubleRepresentableInt64);
+  Type const kDoubleRepresentableInt64OrMinusZero =
+      Type::Union(kDoubleRepresentableInt64, Type::MinusZero(), zone());
+  Type const kDoubleRepresentableUint64 = CreateRange(
+      std::numeric_limits<uint64_t>::min(), kMaxDoubleRepresentableUint64);
+  Type const kFloat16 = Type::Number();
   Type const kFloat32 = Type::Number();
   Type const kFloat64 = Type::Number();
-  Type const kBigInt64 = Type::BigInt();
-  Type const kBigUint64 = Type::BigInt();
+  Type const kBigInt64 = Type::SignedBigInt64();
+  Type const kBigUint64 = Type::UnsignedBigInt64();
 
   Type const kHoleySmi = Type::Union(Type::SignedSmall(), Type::Hole(), zone());
 
@@ -80,7 +84,7 @@ class V8_EXPORT_PRIVATE TypeCache final {
       Type::Union(kPositiveIntegerOrMinusZero, Type::NaN(), zone());
 
   Type const kAdditiveSafeInteger =
-      CreateRange(-4503599627370496.0, 4503599627370496.0);
+      CreateRange(-4503599627370495.0, 4503599627370495.0);
   Type const kSafeInteger = CreateRange(-kMaxSafeInteger, kMaxSafeInteger);
   Type const kAdditiveSafeIntegerOrMinusZero =
       Type::Union(kAdditiveSafeInteger, Type::MinusZero(), zone());
@@ -92,10 +96,9 @@ class V8_EXPORT_PRIVATE TypeCache final {
   // [0, FixedArray::kMaxLength].
   Type const kFixedArrayLengthType = CreateRange(0.0, FixedArray::kMaxLength);
 
-  // The WeakFixedArray::length property always containts a smi in the range
-  // [0, WeakFixedArray::kMaxLength].
+  // The WeakFixedArray::length property always containts a smi in the range:
   Type const kWeakFixedArrayLengthType =
-      CreateRange(0.0, WeakFixedArray::kMaxLength);
+      CreateRange(0.0, WeakFixedArray::kMaxCapacity);
 
   // The FixedDoubleArray::length property always containts a smi in the range
   // [0, FixedDoubleArray::kMaxLength].
@@ -121,9 +124,9 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kJSArrayBufferViewByteOffsetType = kJSArrayBufferByteLengthType;
 
   // The JSTypedArray::length property always contains an untagged number in
-  // the range [0, JSTypedArray::kMaxLength].
+  // the range [0, JSTypedArray::kMaxByteLength].
   Type const kJSTypedArrayLengthType =
-      CreateRange(0.0, JSTypedArray::kMaxLength);
+      CreateRange(0.0, JSTypedArray::kMaxByteLength);
 
   // The String::length property always contains a smi in the range
   // [0, String::kMaxLength].
@@ -168,10 +171,10 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kJSDateWeekdayType =
       Type::Union(CreateRange(0, 6.0), Type::NaN(), zone());
 
-  // The JSDate::year property always contains a tagged number in the signed
-  // small range or NaN.
+  // The JSDate::year property always contains a tagged number in the range
+  // [-271821, 275760] or NaN.
   Type const kJSDateYearType =
-      Type::Union(Type::SignedSmall(), Type::NaN(), zone());
+      Type::Union(CreateRange(-271821, 275760), Type::NaN(), zone());
 
   // The valid number of arguments for JavaScript functions. We can never
   // materialize more than the max size of a fixed array, because we require a
@@ -190,8 +193,11 @@ class V8_EXPORT_PRIVATE TypeCache final {
  private:
   template <typename T>
   Type CreateRange() {
-    return CreateRange(std::numeric_limits<T>::min(),
-                       std::numeric_limits<T>::max());
+    T min = std::numeric_limits<T>::min();
+    T max = std::numeric_limits<T>::max();
+    DCHECK_EQ(min, static_cast<T>(static_cast<double>(min)));
+    DCHECK_EQ(max, static_cast<T>(static_cast<double>(max)));
+    return CreateRange(min, max);
   }
 
   Type CreateRange(double min, double max) {

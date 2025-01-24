@@ -4,7 +4,7 @@
 
 #include "src/compiler/graph-trimmer.h"
 
-#include "src/compiler/graph.h"
+#include "src/compiler/turbofan-graph.h"
 
 namespace v8 {
 namespace internal {
@@ -33,7 +33,7 @@ void GraphTrimmer::TrimGraph() {
     for (Edge edge : live->use_edges()) {
       Node* const user = edge.from();
       if (!IsLive(user)) {
-        if (FLAG_trace_turbo_trimming) {
+        if (v8_flags.trace_turbo_trimming) {
           StdoutStream{} << "DeadLink: " << *user << "(" << edge.index()
                          << ") -> " << *live << std::endl;
         }

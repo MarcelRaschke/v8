@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --invoke-weak-callbacks --omit-quit --expose-wasm --allow-natives-syntax
+// Flags: --invoke-weak-callbacks --omit-quit --allow-natives-syntax
 
-load("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 const builder = new WasmModuleBuilder();
 builder.addFunction('f', kSig_i_v).addBody([kExprI32Const, 42]);

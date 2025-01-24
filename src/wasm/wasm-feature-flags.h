@@ -2,9 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_WASM_FEATURE_FLAGS_H_
 #define V8_WASM_WASM_FEATURE_FLAGS_H_
 
+// Each entry in this file generates a V8 command-line flag with the prefix
+// "--experimental-wasm-".
+//
+// For example, to enable "my_feature", pass
+// --experimental-wasm-my-feature to d8, or
+// --js-flags=--experimental-wasm-my-feature to Chrome.
+//
+// To disable "my_feature", add the "--no-" prefix:
+// --no-experimental-wasm-my-feature.
+//
 // See https://github.com/WebAssembly/proposals for an overview of current
 // WebAssembly proposals.
 
@@ -14,85 +28,126 @@
   /* V8 side owner: clemensb */                                                \
   V(compilation_hints, "compilation hints section", false)                     \
                                                                                \
-  /* GC proposal (early prototype, might change dramatically) */               \
-  /* Official proposal: https://github.com/WebAssembly/gc */                   \
-  /* Prototype engineering spec: https://bit.ly/3cWcm6Q */                     \
+  /* Instruction Tracing tool convention (early prototype, might change) */    \
+  /* Tool convention: https://github.com/WebAssembly/tool-conventions */       \
+  /* V8 side owner: jabraham */                                                \
+  V(instruction_tracing, "instruction tracing section", false)                 \
+                                                                               \
+  /* Non-specified, V8-only experimental additions to the GC proposal */       \
   /* V8 side owner: jkummerow */                                               \
-  V(gc, "garbage collection", false)                                           \
+  V(assume_ref_cast_succeeds,                                                  \
+    "assume ref.cast always succeeds and skip the related type check "         \
+    "(unsafe)",                                                                \
+    false)                                                                     \
+  V(ref_cast_nop, "enable unsafe ref.cast_nop instruction", false)             \
+  V(skip_null_checks,                                                          \
+    "skip null checks for call.ref and array and struct operations (unsafe)",  \
+    false)                                                                     \
+  V(skip_bounds_checks, "skip array bounds checks (unsafe)", false)            \
                                                                                \
-  /* Typed function references proposal. */                                    \
-  /* Official proposal: https://github.com/WebAssembly/function-references */  \
+  /* Branch Hinting proposal. */                                               \
+  /* https://github.com/WebAssembly/branch-hinting */                          \
+  /* V8 side owner: jkummerow */                                               \
+  V(branch_hinting, "branch hinting", false)                                   \
+                                                                               \
+  /* Stack Switching proposal. */                                              \
+  /* https://github.com/WebAssembly/stack-switching */                         \
+  /* V8 side owner: thibaudm, fgm */                                           \
+  V(stack_switching, "stack switching", false)                                 \
+                                                                               \
+  /* Shared-Everything Threads proposal. */                                    \
+  /* https://github.com/WebAssembly/shared-everything-threads */               \
   /* V8 side owner: manoskouk */                                               \
-  V(typed_funcref, "typed function references", false)                         \
+  V(shared, "shared-everything threads", false)                                \
                                                                                \
-  /* Memory64 proposal. */                                                     \
-  /* https://github.com/WebAssembly/memory64 */                                \
-  /* V8 side owner: clemensb */                                                \
-  V(memory64, "memory64", false)
+  /* FP16 proposal. */                                                         \
+  /* https://github.com/WebAssembly/half-precision */                          \
+  /* V8 side owner: irezvov */                                                 \
+  V(fp16, "fp16", false)                                                       \
+                                                                               \
+  /* V8 side owner: irezvov */                                                 \
+  V(growable_stacks, "growable stacks for jspi", false)                        \
+  /* Memory Control proposal */                                                \
+  /* https://github.com/WebAssembly/memory-control */                          \
+  /* V8 side owner: ahaas */                                                   \
+  V(memory_control, "memory control", false)
 
 // #############################################################################
 // Staged features (disabled by default, but enabled via --wasm-staging (also
 // exposed as chrome://flags/#enable-experimental-webassembly-features). Staged
 // features get limited fuzzer coverage, and should come with their own tests.
 // They are not run through all fuzzers though and don't get much exposure in
-// the wild. Staged features do not necessarily be fully stabilized. They should
+// the wild. Staged features are not necessarily fully stabilized. They should
 // be shipped with enough lead time to the next branch to allow for
 // stabilization.
+// Consider adding a chromium-side use counter if you want to track usage in the
+// wild (also see {V8::UseCounterFeature}).
 #define FOREACH_WASM_STAGING_FEATURE_FLAG(V) /*          (force 80 columns) */ \
-  /* Exception handling proposal. */                                           \
-  /* https://github.com/WebAssembly/exception-handling */                      \
-  /* V8 side owner: thibaudm */                                                \
-  /* Staged in v8.9 */                                                         \
-  V(eh, "exception handling opcodes", false)                                   \
-                                                                               \
-  /* Reference Types, a.k.a. reftypes proposal. */                             \
-  /* https://github.com/WebAssembly/reference-types */                         \
-  /* V8 side owner: ahaas */                                                   \
-  /* Staged in v7.8. */                                                        \
-  V(reftypes, "reference type opcodes", false)                                 \
-                                                                               \
-  /* Tail call / return call proposal. */                                      \
-  /* https://github.com/webassembly/tail-call */                               \
-  /* V8 side owner: thibaudm */                                                \
-  /* Staged in v8.7 * */                                                       \
-  V(return_call, "return call opcodes", false)                                 \
-                                                                               \
-  /* Threads proposal. */                                                      \
-  /* https://github.com/webassembly/threads */                                 \
-  /* NOTE: This is enabled via chromium flag on desktop systems since v7.4  */ \
-  /* (see https://crrev.com/c/1487808). ITS: https://groups.google.com/a/   */ \
-  /* chromium.org/d/msg/blink-dev/tD6np-OG2PU/rcNGROOMFQAJ */                  \
-  /* V8 side owner: gdeepti */                                                 \
-  V(threads, "thread opcodes", false)                                          \
-                                                                               \
   /* Type reflection proposal. */                                              \
   /* https://github.com/webassembly/js-types */                                \
   /* V8 side owner: ahaas */                                                   \
   /* Staged in v7.8. */                                                        \
-  V(type_reflection, "wasm type reflection in JS", false)
+  V(type_reflection, "wasm type reflection in JS", false)                      \
+                                                                               \
+  /* Reference-Typed Strings Proposal. */                                      \
+  /* https://github.com/WebAssembly/stringref */                               \
+  /* V8 side owner: jkummerow */                                               \
+  V(stringref, "reference-typed strings", false)                               \
+                                                                               \
+  /* Imported Strings TextEncoder/TextDecoder post-MVP extension. */           \
+  /* No upstream repo yet. */                                                  \
+  /* V8 side owner: jkummerow */                                               \
+  V(imported_strings_utf8, "imported strings (utf8 features)", false)          \
+                                                                               \
+  /* Exnref */                                                                 \
+  /* This flag enables the new exception handling proposal */                  \
+  /* V8 side owner: thibaudm */                                                \
+  V(exnref, "exnref", false)                                                   \
+                                                                               \
+  /* JavaScript Promise Integration proposal. */                               \
+  /* https://github.com/WebAssembly/js-promise-integration */                  \
+  /* V8 side owner: thibaudm, fgm */                                           \
+  V(jspi, "javascript promise integration", false)
 
 // #############################################################################
 // Shipped features (enabled by default). Remove the feature flag once they hit
 // stable and are expected to stay enabled.
 #define FOREACH_WASM_SHIPPED_FEATURE_FLAG(V) /*          (force 80 columns) */ \
-  /* Multi-value proposal. */                                                  \
-  /* https://github.com/WebAssembly/multi-value */                             \
+  /* Legacy exception handling proposal. */                                    \
+  /* https://github.com/WebAssembly/exception-handling */                      \
   /* V8 side owner: thibaudm */                                                \
-  /* Shipped in v8.6. */                                                       \
-  /* ITS: https://groups.google.com/g/v8-users/c/pv2E4yFWeF0 */                \
-  V(mv, "multi-value support", true)                                           \
+  /* Staged in v8.9 */                                                         \
+  /* Shipped in v9.5 */                                                        \
+  V(legacy_eh, "legacy exception handling opcodes", true)                      \
                                                                                \
-  /* Fixed-width SIMD operations. */                                           \
-  /* https://github.com/webassembly/simd */                                    \
-  /* V8 side owner: gdeepti, zhin */                                           \
-  /* Staged in v8.7 * */                                                       \
-  /* Shipped in v9.1 * */                                                      \
-  V(simd, "SIMD opcodes", true)
+  /* Imported Strings Proposal. */                                             \
+  /* https://github.com/WebAssembly/js-string-builtins */                      \
+  /* V8 side owner: jkummerow */                                               \
+  /* Shipped in v13.0 */                                                       \
+  V(imported_strings, "imported strings", true)                                \
+                                                                               \
+  /* Memory64 proposal. */                                                     \
+  /* https://github.com/WebAssembly/memory64 */                                \
+  /* V8 side owner: clemensb */                                                \
+  /* Staged in v11.2 */                                                        \
+  /* Shipped in v13.3 */                                                       \
+  V(memory64, "memory64", true)
 
 // Combination of all available wasm feature flags.
 #define FOREACH_WASM_FEATURE_FLAG(V)        \
   FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(V) \
   FOREACH_WASM_STAGING_FEATURE_FLAG(V)      \
   FOREACH_WASM_SHIPPED_FEATURE_FLAG(V)
+
+// Consistency check: Experimental and staged features are off by default.
+#define CHECK_WASM_FEATURE_OFF_BY_DEFAULT(name, desc, enabled) \
+  static_assert(enabled == false);
+#define CHECK_WASM_FEATURE_ON_BY_DEFAULT(name, desc, enabled) \
+  static_assert(enabled == true);
+FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(CHECK_WASM_FEATURE_OFF_BY_DEFAULT)
+FOREACH_WASM_STAGING_FEATURE_FLAG(CHECK_WASM_FEATURE_OFF_BY_DEFAULT)
+FOREACH_WASM_SHIPPED_FEATURE_FLAG(CHECK_WASM_FEATURE_ON_BY_DEFAULT)
+#undef CHECK_WASM_FEATURE_OFF_BY_DEFAULT
+#undef CHECK_WASM_FEATURE_ON_BY_DEFAULT
 
 #endif  // V8_WASM_WASM_FEATURE_FLAGS_H_

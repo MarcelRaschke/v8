@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "src/base/compiler-specific.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/arm64/assembler-arm64.h"
 #include "src/codegen/arm64/decoder-arm64.h"
 #include "src/codegen/assembler.h"
@@ -251,7 +250,7 @@ class SimMemory {
     DCHECK((sizeof(value) == 1) || (sizeof(value) == 2) ||
            (sizeof(value) == 4) || (sizeof(value) == 8) ||
            (sizeof(value) == 16));
-    base::Memcpy(&value, reinterpret_cast<const char*>(address), sizeof(value));
+    memcpy(&value, reinterpret_cast<const char*>(address), sizeof(value));
     return value;
   }
 
@@ -261,7 +260,7 @@ class SimMemory {
     DCHECK((sizeof(value) == 1) || (sizeof(value) == 2) ||
            (sizeof(value) == 4) || (sizeof(value) == 8) ||
            (sizeof(value) == 16));
-    base::Memcpy(reinterpret_cast<char*>(address), &value, sizeof(value));
+    memcpy(reinterpret_cast<char*>(address), &value, sizeof(value));
   }
 };
 
@@ -327,7 +326,7 @@ class SimRegisterBase {
       // All AArch64 registers are zero-extending.
       memset(value_ + sizeof(new_value), 0, kSizeInBytes - sizeof(new_value));
     }
-    base::Memcpy(&value_, &new_value, sizeof(T));
+    memcpy(&value_, &new_value, sizeof(T));
     NotifyRegisterWrite();
   }
 
@@ -340,8 +339,7 @@ class SimRegisterBase {
     DCHECK_GE(lane, 0);
     DCHECK_LE(sizeof(new_value) + (lane * sizeof(new_value)),
               static_cast<unsigned>(kSizeInBytes));
-    base::Memcpy(&value_[lane * sizeof(new_value)], &new_value,
-                 sizeof(new_value));
+    memcpy(&value_[lane * sizeof(new_value)], &new_value, sizeof(new_value));
     NotifyRegisterWrite();
   }
 
@@ -351,7 +349,7 @@ class SimRegisterBase {
     DCHECK_GE(lane, 0);
     DCHECK_LE(sizeof(result) + (lane * sizeof(result)),
               static_cast<unsigned>(kSizeInBytes));
-    base::Memcpy(&result, &value_[lane * sizeof(result)], sizeof(result));
+    memcpy(&result, &value_[lane * sizeof(result)], sizeof(result));
     return result;
   }
 
@@ -373,6 +371,8 @@ class SimRegisterBase {
 
 using SimRegister = SimRegisterBase<kXRegSize>;   // r0-r31
 using SimVRegister = SimRegisterBase<kQRegSize>;  // v0-v31
+
+using sim_uint128_t = std::pair<uint64_t, uint64_t>;
 
 // Representation of a vector register, with typed getters and setters for lanes
 // and additional information to represent lane state.
@@ -439,7 +439,7 @@ class LogicVRegister {
   int64_t IntLeftJustified(VectorFormat vform, int index) const {
     uint64_t value = UintLeftJustified(vform, index);
     int64_t result;
-    base::Memcpy(&result, &value, sizeof(result));
+    memcpy(&result, &value, sizeof(result));
     return result;
   }
 
@@ -488,6 +488,16 @@ class LogicVRegister {
         UNREACHABLE();
         return;
     }
+  }
+
+  void SetUint(VectorFormat vform, int index, sim_uint128_t value) const {
+    if (LaneSizeInBitsFromFormat(vform) <= 64) {
+      SetUint(vform, index, value.second);
+      return;
+    }
+    DCHECK((vform == kFormat1Q) && (index == 0));
+    SetUint(kFormat2D, 0, value.second);
+    SetUint(kFormat2D, 1, value.first);
   }
 
   void SetUintArray(VectorFormat vform, const uint64_t* src) const {
@@ -631,6 +641,8 @@ class LogicVRegister {
     return *this;
   }
 
+  bool Is(const LogicVRegister& r) const { return &register_ == &r.register_; }
+
  private:
   SimVRegister& register_;
 
@@ -675,13 +687,13 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
     explicit CallArgument(T argument) {
       bits_ = 0;
       DCHECK(sizeof(argument) <= sizeof(bits_));
-      base::Memcpy(&bits_, &argument, sizeof(argument));
+      memcpy(&bits_, &argument, sizeof(argument));
       type_ = X_ARG;
     }
 
     explicit CallArgument(double argument) {
       DCHECK(sizeof(argument) == sizeof(bits_));
-      base::Memcpy(&bits_, &argument, sizeof(argument));
+      memcpy(&bits_, &argument, sizeof(argument));
       type_ = D_ARG;
     }
 
@@ -692,10 +704,10 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
       // Make the D register a NaN to try to trap errors if the callee expects a
       // double. If it expects a float, the callee should ignore the top word.
       DCHECK(sizeof(kFP64SignallingNaN) == sizeof(bits_));
-      base::Memcpy(&bits_, &kFP64SignallingNaN, sizeof(kFP64SignallingNaN));
+      memcpy(&bits_, &kFP64SignallingNaN, sizeof(kFP64SignallingNaN));
       // Write the float payload to the S register.
       DCHECK(sizeof(argument) <= sizeof(bits_));
-      base::Memcpy(&bits_, &argument, sizeof(argument));
+      memcpy(&bits_, &argument, sizeof(argument));
       type_ = D_ARG;
     }
 
@@ -741,13 +753,18 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   bool PrintValue(const char* desc);
 
   // Push an address onto the JS stack.
-  uintptr_t PushAddress(uintptr_t address);
+  V8_EXPORT_PRIVATE uintptr_t PushAddress(uintptr_t address);
 
   // Pop an address from the JS stack.
-  uintptr_t PopAddress();
+  V8_EXPORT_PRIVATE uintptr_t PopAddress();
 
-  // Accessor to the internal simulator stack area.
+  // Accessor to the internal simulator stack area. Adds a safety
+  // margin to prevent overflows (kAdditionalStackMargin).
   uintptr_t StackLimit(uintptr_t c_limit) const;
+  void SetStackLimit(uintptr_t limit);
+  // Return central stack view, without additional safety margins.
+  // Users, for example wasm::StackMemory, can add their own.
+  base::Vector<uint8_t> GetCentralStackView() const;
 
   V8_EXPORT_PRIVATE void ResetState();
 
@@ -762,8 +779,8 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   // Simulation helpers.
   template <typename T>
   void set_pc(T new_pc) {
-    DCHECK(sizeof(T) == sizeof(pc_));
-    base::Memcpy(&pc_, &new_pc, sizeof(T));
+    static_assert(sizeof(T) == sizeof(pc_));
+    memcpy(&pc_, &new_pc, sizeof(T));
     pc_modified_ = true;
   }
   Instruction* pc() { return pc_; }
@@ -908,6 +925,8 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
 #define DECLARE(A) void Visit##A(Instruction* instr);
   VISITOR_LIST(DECLARE)
 #undef DECLARE
+  void VisitNEON3SameFP(NEON3SameOp op, VectorFormat vf, SimVRegister& rd,
+                        SimVRegister& rn, SimVRegister& rm);
 
   bool IsZeroRegister(unsigned code, Reg31Mode r31mode) const {
     return ((code == 31) && (r31mode == Reg31IsZeroRegister));
@@ -1055,7 +1074,7 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
     static_assert(sizeof(result) <= sizeof(raw),
                   "Template type must be <= 64 bits.");
     // Copy the result and truncate to fit. This assumes a little-endian host.
-    base::Memcpy(&result, &raw, sizeof(result));
+    memcpy(&result, &raw, sizeof(result));
     return result;
   }
 
@@ -1115,7 +1134,7 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   // As above, but don't automatically log the register update.
   template <typename T>
   void set_vreg_no_log(unsigned code, T value) {
-    STATIC_ASSERT((sizeof(value) == kBRegSize) ||
+    static_assert((sizeof(value) == kBRegSize) ||
                   (sizeof(value) == kHRegSize) ||
                   (sizeof(value) == kSRegSize) ||
                   (sizeof(value) == kDRegSize) || (sizeof(value) == kQRegSize));
@@ -1405,7 +1424,7 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
     int number;
   };
 
-  static const PACKey kPACKeyIB;
+  static V8_EXPORT_PRIVATE const PACKey kPACKeyIB;
 
   // Current implementation is that all pointers are tagged.
   static bool HasTBI(uint64_t ptr, PointerType type) {
@@ -1494,6 +1513,14 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   void ConditionalCompareHelper(Instruction* instr, T op2);
   void LoadStoreHelper(Instruction* instr, int64_t offset, AddrMode addrmode);
   void LoadStorePairHelper(Instruction* instr, AddrMode addrmode);
+  template <typename T>
+  void CompareAndSwapHelper(const Instruction* instr);
+  template <typename T>
+  void CompareAndSwapPairHelper(const Instruction* instr);
+  template <typename T>
+  void AtomicMemorySimpleHelper(const Instruction* instr);
+  template <typename T>
+  void AtomicMemorySwapHelper(const Instruction* instr);
   uintptr_t LoadStoreAddress(unsigned addr_reg, int64_t offset,
                              AddrMode addrmode);
   void LoadStoreWriteBack(unsigned addr_reg, int64_t offset, AddrMode addrmode);
@@ -1503,24 +1530,36 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
                                        AddrMode addr_mode);
   void CheckMemoryAccess(uintptr_t address, uintptr_t stack);
 
+  // "Probe" if an address range can be read. This is currently implemented
+  // by doing a 1-byte read of the last accessed byte, since the assumption is
+  // that if the last byte is accessible, also all lower bytes are accessible
+  // (which holds true for Wasm).
+  // Returns true if the access was successful, false if the access raised a
+  // signal which was then handled by the trap handler (also see
+  // {trap_handler::ProbeMemory}). If the access raises a signal which is not
+  // handled by the trap handler (e.g. because the current PC is not registered
+  // as a protected instruction), the signal will propagate and make the process
+  // crash. If no trap handler is available, this always returns true.
+  bool ProbeMemory(uintptr_t address, uintptr_t access_size);
+
   // Memory read helpers.
   template <typename T, typename A>
   T MemoryRead(A address) {
     T value;
-    STATIC_ASSERT((sizeof(value) == 1) || (sizeof(value) == 2) ||
+    static_assert((sizeof(value) == 1) || (sizeof(value) == 2) ||
                   (sizeof(value) == 4) || (sizeof(value) == 8) ||
                   (sizeof(value) == 16));
-    base::Memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
     return value;
   }
 
   // Memory write helpers.
   template <typename T, typename A>
   void MemoryWrite(A address, T value) {
-    STATIC_ASSERT((sizeof(value) == 1) || (sizeof(value) == 2) ||
+    static_assert((sizeof(value) == 1) || (sizeof(value) == 2) ||
                   (sizeof(value) == 4) || (sizeof(value) == 8) ||
                   (sizeof(value) == 16));
-    base::Memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
+    memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
   }
 
   template <typename T>
@@ -1534,6 +1573,10 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   template <typename T>
   void BitfieldHelper(Instruction* instr);
   uint16_t PolynomialMult(uint8_t op1, uint8_t op2);
+  sim_uint128_t PolynomialMult128(uint64_t op1, uint64_t op2,
+                                  int lane_size_in_bits) const;
+  sim_uint128_t Lsl128(sim_uint128_t x, unsigned shift) const;
+  sim_uint128_t Eor128(sim_uint128_t x, sim_uint128_t y) const;
 
   void ld1(VectorFormat vform, LogicVRegister dst, uint64_t addr);
   void ld1(VectorFormat vform, LogicVRegister dst, int index, uint64_t addr);
@@ -1978,6 +2021,11 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   LogicVRegister sqrdmulh(VectorFormat vform, LogicVRegister dst,
                           const LogicVRegister& src1,
                           const LogicVRegister& src2, bool round = true);
+  LogicVRegister dot(VectorFormat vform, LogicVRegister dst,
+                     const LogicVRegister& src1, const LogicVRegister& src2,
+                     bool is_src1_signed, bool is_src2_signed);
+  LogicVRegister sdot(VectorFormat vform, LogicVRegister dst,
+                      const LogicVRegister& src1, const LogicVRegister& src2);
   LogicVRegister sqdmulh(VectorFormat vform, LogicVRegister dst,
                          const LogicVRegister& src1,
                          const LogicVRegister& src2);
@@ -2183,8 +2231,12 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   double UFixedToDouble(uint64_t src, int fbits, FPRounding round_mode);
   float FixedToFloat(int64_t src, int fbits, FPRounding round_mode);
   float UFixedToFloat(uint64_t src, int fbits, FPRounding round_mode);
+  float16 FixedToFloat16(int64_t src, int fbits, FPRounding round_mode);
+  float16 UFixedToFloat16(uint64_t src, int fbits, FPRounding round_mode);
+  int16_t FPToInt16(double value, FPRounding rmode);
   int32_t FPToInt32(double value, FPRounding rmode);
   int64_t FPToInt64(double value, FPRounding rmode);
+  uint16_t FPToUInt16(double value, FPRounding rmode);
   uint32_t FPToUInt32(double value, FPRounding rmode);
   uint64_t FPToUInt64(double value, FPRounding rmode);
   int32_t FPToFixedJS(double value);
@@ -2259,6 +2311,9 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   // Pseudo Printf instruction
   void DoPrintf(Instruction* instr);
 
+  // Pseudo instruction for switching stack limit
+  void DoSwitchStackLimit(Instruction* instr);
+
   // Processor state ---------------------------------------
 
   // Output stream.
@@ -2306,9 +2361,15 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
 
   // Stack
   uintptr_t stack_;
-  static const size_t stack_protection_size_ = KB;
-  size_t stack_size_;
+  static const size_t kStackProtectionSize = KB;
+  // This includes a protection margin at each end of the stack area.
+  static size_t AllocatedStackSize() {
+    return (v8_flags.sim_stack_size * KB) + (2 * kStackProtectionSize);
+  }
+  static size_t UsableStackSize() { return v8_flags.sim_stack_size * KB; }
   uintptr_t stack_limit_;
+  // Added in Simulator::StackLimit()
+  static const int kAdditionalStackMargin = 4 * KB;
 
   Decoder<DispatchingDecoderVisitor>* decoder_;
   Decoder<DispatchingDecoderVisitor>* disassembler_decoder_;
@@ -2438,16 +2499,21 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
 
   V8_EXPORT_PRIVATE void CallImpl(Address entry, CallArgument* args);
 
+  void CallAnyCTypeFunction(Address target_address,
+                            const EncodedCSignature& signature);
+
   // Read floating point return values.
   template <typename T>
-  typename std::enable_if<std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  T ReadReturn()
+    requires std::is_floating_point<T>::value
+  {
     return static_cast<T>(dreg(0));
   }
   // Read non-float return values.
   template <typename T>
-  typename std::enable_if<!std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  T ReadReturn()
+    requires(!std::is_floating_point<T>::value)
+  {
     return ConvertReturn<T>(xreg(0));
   }
 
@@ -2500,7 +2566,7 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   }
 
   int log_parameters_;
-  // Instruction counter only valid if FLAG_stop_sim_at isn't 0.
+  // Instruction counter only valid if v8_flags.stop_sim_at isn't 0.
   int icount_for_stop_sim_at_;
   Isolate* isolate_;
 };
@@ -2513,6 +2579,11 @@ inline double Simulator::FPDefaultNaN<double>() {
 template <>
 inline float Simulator::FPDefaultNaN<float>() {
   return kFP32DefaultNaN;
+}
+
+template <>
+inline float16 Simulator::FPDefaultNaN<float16>() {
+  return kFP16DefaultNaN;
 }
 
 }  // namespace internal

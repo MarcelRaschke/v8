@@ -5,7 +5,7 @@
 #ifndef V8_COMPILER_ESCAPE_ANALYSIS_H_
 #define V8_COMPILER_ESCAPE_ANALYSIS_H_
 
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/common/globals.h"
 #include "src/compiler/graph-reducer.h"
 #include "src/compiler/js-graph.h"
@@ -138,6 +138,11 @@ class VirtualObject : public Dependable {
       return Nothing<Variable>();
     }
     return Just(fields_.at(offset / kTaggedSize));
+  }
+  Maybe<Variable> FieldAt(Maybe<int> maybe_offset) const {
+    int offset;
+    if (!maybe_offset.To(&offset)) return Nothing<Variable>();
+    return FieldAt(offset);
   }
   Id id() const { return id_; }
   int size() const { return static_cast<int>(kTaggedSize * fields_.size()); }

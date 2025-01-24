@@ -6,7 +6,6 @@
 #define V8_COMPILER_TYPED_OPTIMIZATION_H_
 
 #include "src/base/compiler-specific.h"
-#include "src/common/globals.h"
 #include "src/compiler/graph-reducer.h"
 
 namespace v8 {
@@ -44,7 +43,9 @@ class V8_EXPORT_PRIVATE TypedOptimization final
   Reduction ReduceCheckHeapObject(Node* node);
   Reduction ReduceCheckMaps(Node* node);
   Reduction ReduceCheckNumber(Node* node);
+  Reduction ReduceCheckNumberFitsInt32(Node* node);
   Reduction ReduceCheckString(Node* node);
+  Reduction ReduceCheckStringOrStringWrapper(Node* node);
   Reduction ReduceCheckEqualsInternalizedString(Node* node);
   Reduction ReduceCheckEqualsSymbol(Node* node);
   Reduction ReduceLoadField(Node* node);
@@ -60,18 +61,21 @@ class V8_EXPORT_PRIVATE TypedOptimization final
   Reduction ReduceSelect(Node* node);
   Reduction ReduceSpeculativeToNumber(Node* node);
   Reduction ReduceCheckNotTaggedHole(Node* node);
+  Reduction ReduceTypedArrayLength(Node* node);
   Reduction ReduceTypeOf(Node* node);
   Reduction ReduceToBoolean(Node* node);
   Reduction ReduceSpeculativeNumberAdd(Node* node);
   Reduction ReduceSpeculativeNumberMultiply(Node* node);
+  Reduction ReduceSpeculativeNumberPow(Node* node);
   Reduction ReduceSpeculativeNumberBinop(Node* node);
   Reduction ReduceSpeculativeNumberComparison(Node* node);
+  Reduction ReduceTransitionElementsKindOrCheckMap(Node* node);
 
   Reduction TryReduceStringComparisonOfStringFromSingleCharCode(
       Node* comparison, Node* from_char_code, Type constant_type,
       bool inverted);
   Reduction TryReduceStringComparisonOfStringFromSingleCharCodeToConstant(
-      Node* comparison, const StringRef& string, bool inverted);
+      Node* comparison, StringRef string, bool inverted);
   const Operator* NumberComparisonFor(const Operator* op);
 
   Node* ConvertPlainPrimitiveToNumber(Node* node);

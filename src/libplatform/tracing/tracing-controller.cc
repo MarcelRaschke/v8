@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include "include/libplatform/v8-tracing.h"
-
 #include "src/base/atomicops.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/time.h"
@@ -70,7 +69,9 @@ const int g_num_builtin_categories = 3;
 v8::base::AtomicWord g_category_index = g_num_builtin_categories;
 #endif  // !defined(V8_USE_PERFETTO)
 
-TracingController::TracingController() { mutex_.reset(new base::Mutex()); }
+TracingController::TracingController() {
+  mutex_.reset(new base::SpinningMutex());
+}
 
 TracingController::~TracingController() {
   StopTracing();
@@ -78,7 +79,7 @@ TracingController::~TracingController() {
 #if !defined(V8_USE_PERFETTO)
   {
     // Free memory for category group names allocated via strdup.
-    base::MutexGuard lock(mutex_.get());
+    base::SpinningMutexGuard lock(mutex_.get());
     for (size_t i = g_category_index - 1; i >= g_num_builtin_categories; --i) {
       const char* group = g_category_groups[i];
       g_category_groups[i] = nullptr;
@@ -106,7 +107,7 @@ void TracingController::Initialize(TraceBuffer* trace_buffer) {
 }
 
 int64_t TracingController::CurrentTimestampMicroseconds() {
-  return base::TimeTicks::HighResolutionNow().ToInternalValue();
+  return base::TimeTicks::Now().ToInternalValue();
 }
 
 int64_t TracingController::CurrentCpuTimestampMicroseconds() {
@@ -141,7 +142,7 @@ uint64_t TracingController::AddTraceEventWithTimestamp(
     TraceObject* trace_object = trace_buffer_->AddTraceEvent(&handle);
     if (trace_object) {
       {
-        base::MutexGuard lock(mutex_.get());
+        base::SpinningMutexGuard lock(mutex_.get());
         trace_object->Initialize(phase, category_enabled_flag, name, scope, id,
                                  bind_id, num_args, arg_names, arg_types,
                                  arg_values, arg_convertables, flags, timestamp,
@@ -206,18 +207,19 @@ void TracingController::StartTracing(TraceConfig* trace_config) {
 #endif  // V8_USE_PERFETTO
 
   trace_config_.reset(trace_config);
+  recording_.store(true, std::memory_order_release);
+
+#ifndef V8_USE_PERFETTO
   std::unordered_set<v8::TracingController::TraceStateObserver*> observers_copy;
   {
-    base::MutexGuard lock(mutex_.get());
-    recording_.store(true, std::memory_order_release);
-#ifndef V8_USE_PERFETTO
+    base::SpinningMutexGuard lock(mutex_.get());
     UpdateCategoryGroupEnabledFlags();
-#endif
     observers_copy = observers_;
   }
   for (auto o : observers_copy) {
     o->OnTraceEnabled();
   }
+#endif
 }
 
 void TracingController::StopTracing() {
@@ -227,15 +229,15 @@ void TracingController::StopTracing() {
   }
 #ifndef V8_USE_PERFETTO
   UpdateCategoryGroupEnabledFlags();
-#endif
   std::unordered_set<v8::TracingController::TraceStateObserver*> observers_copy;
   {
-    base::MutexGuard lock(mutex_.get());
+    base::SpinningMutexGuard lock(mutex_.get());
     observers_copy = observers_;
   }
   for (auto o : observers_copy) {
     o->OnTraceDisabled();
   }
+#endif
 
 #ifdef V8_USE_PERFETTO
   tracing_session_->StopBlocking();
@@ -256,7 +258,7 @@ void TracingController::StopTracing() {
 #else
 
   {
-    base::MutexGuard lock(mutex_.get());
+    base::SpinningMutexGuard lock(mutex_.get());
     DCHECK(trace_buffer_);
     trace_buffer_->Flush();
   }
@@ -307,7 +309,7 @@ const uint8_t* TracingController::GetCategoryGroupEnabled(
   }
 
   // Slow path. Grab the lock.
-  base::MutexGuard lock(mutex_.get());
+  base::SpinningMutexGuard lock(mutex_.get());
 
   // Check the list again with lock in hand.
   unsigned char* category_group_enabled = nullptr;
@@ -341,12 +343,11 @@ const uint8_t* TracingController::GetCategoryGroupEnabled(
   }
   return category_group_enabled;
 }
-#endif  // !defined(V8_USE_PERFETTO)
 
 void TracingController::AddTraceStateObserver(
     v8::TracingController::TraceStateObserver* observer) {
   {
-    base::MutexGuard lock(mutex_.get());
+    base::SpinningMutexGuard lock(mutex_.get());
     observers_.insert(observer);
     if (!recording_.load(std::memory_order_acquire)) return;
   }
@@ -356,10 +357,11 @@ void TracingController::AddTraceStateObserver(
 
 void TracingController::RemoveTraceStateObserver(
     v8::TracingController::TraceStateObserver* observer) {
-  base::MutexGuard lock(mutex_.get());
+  base::SpinningMutexGuard lock(mutex_.get());
   DCHECK(observers_.find(observer) != observers_.end());
   observers_.erase(observer);
 }
+#endif  // !defined(V8_USE_PERFETTO)
 
 }  // namespace tracing
 }  // namespace platform

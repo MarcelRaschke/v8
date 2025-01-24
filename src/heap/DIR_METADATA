@@ -7,5 +7,8 @@
 #   https://source.chromium.org/chromium/infra/infra/+/master:go/src/infra/tools/dirmd/proto/dir_metadata.proto
 
 monorail {
-  component: "Blink>JavaScript>GC"
+  component: "Blink>JavaScript>GarbageCollection"
+}
+buganizer_public: {
+  component_id: 1456490
 }

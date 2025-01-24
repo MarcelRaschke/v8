@@ -9,7 +9,6 @@
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "src/base/platform/wrappers.h"
 #include "src/utils/allocation.h"
 #include "src/zone/zone-compression.h"
 #include "src/zone/zone-segment.h"
@@ -41,9 +40,8 @@ VirtualMemory ReserveAddressSpace(v8::PageAllocator* platform_allocator) {
     return memory;
   }
 
-  FATAL(
-      "Fatal process out of memory: Failed to reserve memory for compressed "
-      "zones");
+  base::FatalOOM(base::OOMType::kProcess,
+                 "Failed to reserve memory for compressed zones");
   UNREACHABLE();
 }
 
@@ -54,7 +52,9 @@ std::unique_ptr<v8::base::BoundedPageAllocator> CreateBoundedAllocator(
 
   auto allocator = std::make_unique<v8::base::BoundedPageAllocator>(
       platform_allocator, reservation_start, ZoneCompression::kReservationSize,
-      kZonePageSize);
+      kZonePageSize,
+      base::PageInitializationMode::kAllocatedPagesCanBeUninitialized,
+      base::PageFreeingMode::kMakeInaccessible);
 
   // Exclude first page from allocation to ensure that accesses through
   // decompressed null pointer will seg-fault.
@@ -86,7 +86,9 @@ Segment* AccountingAllocator::AllocateSegment(size_t bytes,
                            kZonePageSize, PageAllocator::kReadWrite);
 
   } else {
-    memory = AllocWithRetry(bytes);
+    auto result = AllocAtLeastWithRetry(bytes);
+    memory = result.ptr;
+    bytes = result.count;
   }
   if (memory == nullptr) return nullptr;
 
@@ -108,9 +110,9 @@ void AccountingAllocator::ReturnSegment(Segment* segment,
   current_memory_usage_.fetch_sub(segment_size, std::memory_order_relaxed);
   segment->ZapHeader();
   if (COMPRESS_ZONES_BOOL && supports_compression) {
-    CHECK(FreePages(bounded_page_allocator_.get(), segment, segment_size));
+    FreePages(bounded_page_allocator_.get(), segment, segment_size);
   } else {
-    base::Free(segment);
+    free(segment);
   }
 }
 

@@ -21,7 +21,6 @@
 #include "src/base/hashmap.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/platform/mutex.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/ppc/constants-ppc.h"
 #include "src/execution/simulator-base.h"
@@ -177,11 +176,11 @@ class Simulator : public SimulatorBase {
   double get_double_from_register_pair(int reg);
   void set_d_register_from_double(int dreg, const double dbl) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    *bit_cast<double*>(&fp_registers_[dreg]) = dbl;
+    fp_registers_[dreg] = base::bit_cast<int64_t>(dbl);
   }
   double get_double_from_d_register(int dreg) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    return *bit_cast<double*>(&fp_registers_[dreg]);
+    return base::bit_cast<double>(fp_registers_[dreg]);
   }
   void set_d_register(int dreg, int64_t value) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
@@ -201,8 +200,13 @@ class Simulator : public SimulatorBase {
   // Accessor to the internal Link Register
   intptr_t get_lr() const;
 
-  // Accessor to the internal simulator stack area.
+  // Accessor to the internal simulator stack area. Adds a safety
+  // margin to prevent overflows.
   uintptr_t StackLimit(uintptr_t c_limit) const;
+
+  // Return central stack view, without additional safety margins.
+  // Users, for example wasm::StackMemory, can add their own.
+  base::Vector<uint8_t> GetCentralStackView() const;
 
   // Executes PPC instructions until the PC reaches end_sim_pc.
   void Execute();
@@ -218,10 +222,10 @@ class Simulator : public SimulatorBase {
   double CallFPReturnsDouble(Address entry, double d0, double d1);
 
   // Push an address onto the JS stack.
-  uintptr_t PushAddress(uintptr_t address);
+  V8_EXPORT_PRIVATE uintptr_t PushAddress(uintptr_t address);
 
   // Pop an address from the JS stack.
-  uintptr_t PopAddress();
+  V8_EXPORT_PRIVATE uintptr_t PopAddress();
 
   // Debugger input.
   void set_last_debugger_input(char* input);
@@ -238,6 +242,11 @@ class Simulator : public SimulatorBase {
   // Returns true if pc register contains one of the 'special_values' defined
   // below (bad_lr, end_sim_pc).
   bool has_bad_pc() const;
+
+  // Manage instruction tracing.
+  bool InstructionTracingEnabled();
+
+  void ToggleInstructionTracing();
 
   enum special_values {
     // Known bad pc value to ensure that the simulator does not execute
@@ -274,6 +283,10 @@ class Simulator : public SimulatorBase {
   void SoftwareInterrupt(Instruction* instr);
   void DebugAtNextPC();
 
+  // Take a copy of v8 simulator tracing flag because flags are frozen after
+  // start.
+  bool instruction_tracing_ = v8_flags.trace_sim;
+
   // Stop helper functions.
   inline bool isStopInstruction(Instruction* instr);
   inline bool isWatchedStop(uint32_t bkpt_code);
@@ -287,7 +300,7 @@ class Simulator : public SimulatorBase {
   template <typename T>
   inline void Read(uintptr_t address, T* value) {
     base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-    base::Memcpy(value, reinterpret_cast<const char*>(address), sizeof(T));
+    memcpy(value, reinterpret_cast<const char*>(address), sizeof(T));
   }
 
   template <typename T>
@@ -296,7 +309,7 @@ class Simulator : public SimulatorBase {
     GlobalMonitor::Get()->NotifyLoadExcl(
         address, static_cast<TransactionSize>(sizeof(T)),
         isolate_->thread_id());
-    base::Memcpy(value, reinterpret_cast<const char*>(address), sizeof(T));
+    memcpy(value, reinterpret_cast<const char*>(address), sizeof(T));
   }
 
   template <typename T>
@@ -305,7 +318,7 @@ class Simulator : public SimulatorBase {
     GlobalMonitor::Get()->NotifyStore(address,
                                       static_cast<TransactionSize>(sizeof(T)),
                                       isolate_->thread_id());
-    base::Memcpy(reinterpret_cast<char*>(address), &value, sizeof(T));
+    memcpy(reinterpret_cast<char*>(address), &value, sizeof(T));
   }
 
   template <typename T>
@@ -314,11 +327,23 @@ class Simulator : public SimulatorBase {
     if (GlobalMonitor::Get()->NotifyStoreExcl(
             address, static_cast<TransactionSize>(sizeof(T)),
             isolate_->thread_id())) {
-      base::Memcpy(reinterpret_cast<char*>(address), &value, sizeof(T));
+      memcpy(reinterpret_cast<char*>(address), &value, sizeof(T));
       return 0;
     } else {
       return 1;
     }
+  }
+
+  // Byte Reverse.
+  static inline __uint128_t __builtin_bswap128(__uint128_t v) {
+    union {
+      uint64_t u64[2];
+      __uint128_t u128;
+    } res, val;
+    val.u128 = v;
+    res.u64[0] = ByteReverse<int64_t>(val.u64[1]);
+    res.u64[1] = ByteReverse<int64_t>(val.u64[0]);
+    return res.u128;
   }
 
 #define RW_VAR_LIST(V)      \
@@ -340,7 +365,7 @@ class Simulator : public SimulatorBase {
 
   void Trace(Instruction* instr);
   void SetCR0(intptr_t result, bool setSO = false);
-  void SetCR6(bool true_for_all, bool false_for_all);
+  void SetCR6(bool true_for_all);
   void ExecuteBranchConditional(Instruction* instr, BCType type);
   void ExecuteGeneric(Instruction* instr);
 
@@ -419,6 +444,16 @@ class Simulator : public SimulatorBase {
   }
 
   template <class T>
+  T get_simd_register_bytes(int reg, int byte_from) {
+    // Byte location is reversed in memory.
+    int from = kSimd128Size - 1 - (byte_from + sizeof(T) - 1);
+    void* src = reinterpret_cast<uint8_t*>(&simd_registers_[reg]) + from;
+    T dst;
+    memcpy(&dst, src, sizeof(T));
+    return dst;
+  }
+
+  template <class T>
   void set_simd_register_by_lane(int reg, int lane, const T& value,
                                  bool force_ibm_lane_numbering = true) {
     if (force_ibm_lane_numbering) {
@@ -431,15 +466,31 @@ class Simulator : public SimulatorBase {
     (reinterpret_cast<T*>(&simd_registers_[reg]))[lane] = value;
   }
 
-  simdr_t get_simd_register(int reg) { return simd_registers_[reg]; }
+  template <class T>
+  void set_simd_register_bytes(int reg, int byte_from, T value) {
+    // Byte location is reversed in memory.
+    int from = kSimd128Size - 1 - (byte_from + sizeof(T) - 1);
+    void* dst = reinterpret_cast<uint8_t*>(&simd_registers_[reg]) + from;
+    memcpy(dst, &value, sizeof(T));
+  }
+
+  simdr_t& get_simd_register(int reg) { return simd_registers_[reg]; }
 
   void set_simd_register(int reg, const simdr_t& value) {
     simd_registers_[reg] = value;
   }
 
-  // Simulator support.
-  char* stack_;
-  static const size_t stack_protection_size_ = 256 * kSystemPointerSize;
+  // Simulator support for the stack.
+  uint8_t* stack_;
+  static const size_t kStackProtectionSize = 256 * kSystemPointerSize;
+  // This includes a protection margin at each end of the stack area.
+  static size_t AllocatedStackSize() {
+    size_t stack_size = v8_flags.sim_stack_size * KB;
+    return stack_size + (2 * kStackProtectionSize);
+  }
+  static size_t UsableStackSize() {
+    return AllocatedStackSize() - kStackProtectionSize;
+  }
   bool pc_modified_;
   int icount_;
 

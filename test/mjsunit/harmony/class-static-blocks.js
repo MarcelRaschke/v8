@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-class-static-blocks
-
 {
   // Basic functionality
   let log = [];
@@ -113,6 +111,19 @@
   assertArrayEquals([undefined], log);
 }
 
+{
+  // 'await' is allowed as an identifier name in named function expressions.
+  class C1 { static { (function await() {}); } }
+  // 'return' is allowed across function boundaries inside static blocks.
+  class C2 { static {
+      function f1() { return; }
+      function f2() { return 0; }
+      let f3 = (x => { return x; })
+      let f4 = (x => { return; })
+    }
+  }
+}
+
 function assertDoesntParse(expr, context_start, context_end) {
   assertThrows(() => {
     eval(`${context_start} class C { static { ${expr} } } ${context_end}`);
@@ -131,4 +142,23 @@ for (let [s, e] of [['', ''],
   // 'await' is disallowed as an identifier.
   assertDoesntParse('let await;', s, e);
   assertDoesntParse('await;', s, e);
+  assertDoesntParse('function await() {}', s, e);
+  assertDoesntParse('class await() {}', s, e);
+  assertDoesntParse('try {} catch (await) {}', s, e);
+  assertDoesntParse('try {} catch ({await}) {}', s, e);
+  assertDoesntParse('var {await} = 0;', s, e);
+  assertDoesntParse('({await} = 0);', s, e);
+  assertDoesntParse('return;', s, e);
+  assertDoesntParse('return 0;', s, e);
+  assertDoesntParse('{ return; }', s, e);
+  assertDoesntParse('{ return 0; }', s, e);
+  // lets that hoist over vars inside blocks are redeclaration errors.
+  //
+  // At the static block top level this is actually allowed, because
+  // LexicallyDeclaredNames recurs into ClassStaticBlockStatementList using
+  // TopLevelLexicallyDeclaredNames, which regards function declarations as var
+  // names, not lexical.
+  assertDoesntParse('{ var f; function f() {} }', s, e);
+  assertDoesntParse('{ var f; let f; }', s, e);
+  assertDoesntParse('{ var f; const f; }', s, e);
 }

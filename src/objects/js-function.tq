@@ -3,12 +3,10 @@
 // found in the LICENSE file.
 
 @abstract
-@generateCppClass
-extern class JSFunctionOrBoundFunction extends JSObject {
-}
+extern class JSFunctionOrBoundFunctionOrWrappedFunction extends JSObject {}
 
-@generateCppClass
-extern class JSBoundFunction extends JSFunctionOrBoundFunction {
+extern class JSBoundFunction extends
+    JSFunctionOrBoundFunctionOrWrappedFunction {
   // The wrapped function object.
   bound_target_function: Callable;
   // The value that is always passed as the this value when calling the wrapped
@@ -19,15 +17,35 @@ extern class JSBoundFunction extends JSFunctionOrBoundFunction {
   bound_arguments: FixedArray;
 }
 
+extern class JSWrappedFunction extends
+    JSFunctionOrBoundFunctionOrWrappedFunction {
+  // The wrapped function object.
+  wrapped_target_function: Callable;
+  // The creation context.
+  context: NativeContext;
+}
+
+// This class does not use the generated verifier, so if you change anything
+// here, please also update JSFunctionVerify in objects-debug.cc.
 @highestInstanceTypeWithinParentClassRange
-extern class JSFunction extends JSFunctionOrBoundFunction {
+extern class JSFunction extends JSFunctionOrBoundFunctionOrWrappedFunction {
+  // TODO(saelo): drop this field once we call through the dispatch_handle.
+  @ifnot(V8_ENABLE_LEAPTIERING) code: TrustedPointer<Code>;
+  @if(V8_ENABLE_LEAPTIERING) dispatch_handle: int32;
+  @if(V8_ENABLE_LEAPTIERING_TAGGED_SIZE_8_BYTES) padding: int32;
   shared_function_info: SharedFunctionInfo;
   context: Context;
   feedback_cell: FeedbackCell;
-  weak code: Code;
-
   // Space for the following field may or may not be allocated.
-  @noVerifier weak prototype_or_initial_map: JSReceiver|Map;
+  prototype_or_initial_map: JSReceiver|Map;
 }
+
+// Class constructors are special, because they are callable, but [[Call]] will
+// raise an exception.
+// See ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList ).
+@doNotGenerateCast
+@highestInstanceTypeWithinParentClassRange
+extern class JSClassConstructor extends JSFunction
+    generates 'TNode<JSFunction>';
 
 type JSFunctionWithPrototypeSlot extends JSFunction;

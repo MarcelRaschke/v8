@@ -5,8 +5,9 @@
 #ifndef V8_UTILS_LOCKED_QUEUE_H_
 #define V8_UTILS_LOCKED_QUEUE_H_
 
+#include <atomic>
+
 #include "src/base/platform/platform.h"
-#include "src/utils/allocation.h"
 
 namespace v8 {
 namespace internal {
@@ -27,14 +28,16 @@ class LockedQueue final {
   inline bool Dequeue(Record* record);
   inline bool IsEmpty() const;
   inline bool Peek(Record* record) const;
+  inline size_t size() const;
 
  private:
   struct Node;
 
-  mutable base::Mutex head_mutex_;
-  base::Mutex tail_mutex_;
+  mutable base::SpinningMutex head_mutex_;
+  base::SpinningMutex tail_mutex_;
   Node* head_;
   Node* tail_;
+  std::atomic<size_t> size_;
 };
 
 }  // namespace internal

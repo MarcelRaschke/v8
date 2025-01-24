@@ -18,7 +18,7 @@ class Recorder::Task : public v8::Task {
   void Run() override {
     std::queue<std::unique_ptr<Recorder::DelayedEventBase>> delayed_events;
     {
-      base::MutexGuard lock_scope(&recorder_->lock_);
+      base::SpinningMutexGuard lock_scope(&recorder_->lock_);
       delayed_events.swap(recorder_->delayed_events_);
     }
     while (!delayed_events.empty()) {
@@ -31,7 +31,7 @@ class Recorder::Task : public v8::Task {
   std::shared_ptr<Recorder> recorder_;
 };
 
-void Recorder::SetRecorder(
+void Recorder::SetEmbedderRecorder(
     Isolate* isolate,
     const std::shared_ptr<v8::metrics::Recorder>& embedder_recorder) {
   foreground_task_runner_ = V8::GetCurrentPlatform()->GetForegroundTaskRunner(
@@ -40,6 +40,8 @@ void Recorder::SetRecorder(
   embedder_recorder_ = embedder_recorder;
 }
 
+bool Recorder::HasEmbedderRecorder() const { return embedder_recorder_.get(); }
+
 void Recorder::NotifyIsolateDisposal() {
   if (embedder_recorder_) {
     embedder_recorder_->NotifyIsolateDisposal();
@@ -47,7 +49,7 @@ void Recorder::NotifyIsolateDisposal() {
 }
 
 void Recorder::Delay(std::unique_ptr<Recorder::DelayedEventBase>&& event) {
-  base::MutexGuard lock_scope(&lock_);
+  base::SpinningMutexGuard lock_scope(&lock_);
   bool was_empty = delayed_events_.empty();
   delayed_events_.push(std::move(event));
   if (was_empty) {

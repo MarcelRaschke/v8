@@ -5,6 +5,7 @@
 #ifndef V8_DEOPTIMIZER_DEOPTIMIZER_H_
 #define V8_DEOPTIMIZER_DEOPTIMIZER_H_
 
+#include <optional>
 #include <vector>
 
 #include "src/builtins/builtins.h"
@@ -15,8 +16,17 @@
 #include "src/diagnostics/code-tracer.h"
 #include "src/objects/js-function.h"
 
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/sandbox/hardware-support.h"
+#include "src/wasm/value-type.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 namespace v8 {
 namespace internal {
+
+namespace wasm {
+class WasmCode;
+}
 
 enum class BuiltinContinuationMode;
 
@@ -27,32 +37,55 @@ class Deoptimizer : public Malloced {
  public:
   struct DeoptInfo {
     DeoptInfo(SourcePosition position, DeoptimizeReason deopt_reason,
-              int deopt_id)
-        : position(position), deopt_reason(deopt_reason), deopt_id(deopt_id) {}
+              uint32_t node_id, int deopt_id)
+        : position(position),
+          deopt_reason(deopt_reason),
+          node_id(node_id),
+          deopt_id(deopt_id) {}
 
     const SourcePosition position;
     const DeoptimizeReason deopt_reason;
+    const uint32_t node_id;
     const int deopt_id;
   };
 
-  static DeoptInfo GetDeoptInfo(Code code, Address from);
+  // Whether the deopt exit is contained by the outermost loop containing the
+  // osr'd loop. For example:
+  //
+  //  for (;;) {
+  //    for (;;) {
+  //    }  // OSR is triggered on this backedge.
+  //  }  // This is the outermost loop containing the osr'd loop.
+  static bool DeoptExitIsInsideOsrLoop(Isolate* isolate,
+                                       Tagged<JSFunction> function,
+                                       BytecodeOffset deopt_exit_offset,
+                                       BytecodeOffset osr_offset);
+  static DeoptInfo GetDeoptInfo(Tagged<Code> code, Address from);
+  DeoptInfo GetDeoptInfo() const {
+    return Deoptimizer::GetDeoptInfo(compiled_code_, from_);
+  }
 
-  static int ComputeSourcePositionFromBytecodeArray(
-      Isolate* isolate, SharedFunctionInfo shared,
-      BytecodeOffset bytecode_offset);
+  static const char* MessageFor(DeoptimizeKind kind);
 
-  static const char* MessageFor(DeoptimizeKind kind, bool reuse_code);
-
-  Handle<JSFunction> function() const;
-  Handle<Code> compiled_code() const;
+  DirectHandle<JSFunction> function() const;
+  DirectHandle<Code> compiled_code() const;
   DeoptimizeKind deopt_kind() const { return deopt_kind_; }
+  int output_count() const { return output_count_; }
 
-  bool should_reuse_code() const;
+  // Where the deopt exit occurred *in the outermost frame*, i.e in the
+  // function we generated OSR'd code for. If the deopt occurred in an inlined
+  // function, this would point at the corresponding outermost Call bytecode.
+  BytecodeOffset bytecode_offset_in_outermost_frame() const {
+    return bytecode_offset_in_outermost_frame_;
+  }
 
   static Deoptimizer* New(Address raw_function, DeoptimizeKind kind,
-                          unsigned deopt_exit_index, Address from,
-                          int fp_to_sp_delta, Isolate* isolate);
+                          Address from, int fp_to_sp_delta, Isolate* isolate);
   static Deoptimizer* Grab(Isolate* isolate);
+
+  // Delete and deregister the deoptimizer from the current isolate. Returns the
+  // count of output (liftoff) frames that were constructed by the deoptimizer.
+  static size_t DeleteForWasm(Isolate* isolate);
 
   // The returned object with information on the optimized frame needs to be
   // freed before another one can be generated.
@@ -64,7 +97,9 @@ class Deoptimizer : public Malloced {
   // again and any activations of the optimized code will get deoptimized when
   // execution returns. If {code} is specified then the given code is targeted
   // instead of the function code (e.g. OSR code not installed on function).
-  static void DeoptimizeFunction(JSFunction function, Code code = Code());
+  static void DeoptimizeFunction(Tagged<JSFunction> function,
+                                 LazyDeoptimizeReason reason,
+                                 Tagged<Code> code = {});
 
   // Deoptimize all code in the given isolate.
   V8_EXPORT_PRIVATE static void DeoptimizeAll(Isolate* isolate);
@@ -74,12 +109,18 @@ class Deoptimizer : public Malloced {
   // refer to that code.
   static void DeoptimizeMarkedCode(Isolate* isolate);
 
+  // Deoptimizes all optimized code that implements the given function (whether
+  // directly or inlined).
+  static void DeoptimizeAllOptimizedCodeWithFunction(
+      Isolate* isolate, DirectHandle<SharedFunctionInfo> function);
+
   // Check the given address against a list of allowed addresses, to prevent a
   // potential attacker from using the frame creation process in the
   // deoptimizer, in particular the signing process, to gain control over the
   // program.
-  // When building mksnapshot, always return false.
-  static bool IsValidReturnAddress(Address address);
+  // This function makes a crash if the address is not valid. If it's valid,
+  // it returns the given address.
+  static Address EnsureValidReturnAddress(Isolate* isolate, Address address);
 
   ~Deoptimizer();
 
@@ -87,20 +128,9 @@ class Deoptimizer : public Malloced {
 
   static void ComputeOutputFrames(Deoptimizer* deoptimizer);
 
-  // Returns the builtin that will perform a check and either eagerly deopt with
-  // |reason| or resume execution in the optimized code.
-  V8_EXPORT_PRIVATE static Builtins::Name GetDeoptWithResumeBuiltin(
-      DeoptimizeReason reason);
+  V8_EXPORT_PRIVATE static Builtin GetDeoptimizationEntry(DeoptimizeKind kind);
 
-  V8_EXPORT_PRIVATE static Builtins::Name GetDeoptimizationEntry(
-      DeoptimizeKind kind);
-
-  // Returns true if {addr} is a deoptimization entry and stores its type in
-  // {type_out}. Returns false if {addr} is not a deoptimization entry.
-  static bool IsDeoptimizationEntry(Isolate* isolate, Address addr,
-                                    DeoptimizeKind* type_out);
-
-  // Code generation support.
+  // InstructionStream generation support.
   static int input_offset() { return offsetof(Deoptimizer, input_); }
   static int output_count_offset() {
     return offsetof(Deoptimizer, output_count_);
@@ -111,61 +141,83 @@ class Deoptimizer : public Malloced {
     return offsetof(Deoptimizer, caller_frame_top_);
   }
 
-  V8_EXPORT_PRIVATE static int GetDeoptimizedCodeCount(Isolate* isolate);
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+  static constexpr int shadow_stack_offset() {
+    return offsetof(Deoptimizer, shadow_stack_);
+  }
+
+  static constexpr int shadow_stack_count_offset() {
+    return offsetof(Deoptimizer, shadow_stack_count_);
+  }
+#endif  // V8_ENABLE_CET_SHADOW_STACK
 
   Isolate* isolate() const { return isolate_; }
 
   static constexpr int kMaxNumberOfEntries = 16384;
 
   // This marker is passed to Deoptimizer::New as {deopt_exit_index} on
-  // platforms that have fixed deopt sizes (see also
-  // kSupportsFixedDeoptExitSizes). The actual deoptimization id is then
+  // platforms that have fixed deopt sizes. The actual deoptimization id is then
   // calculated from the return address.
   static constexpr unsigned kFixedExitSizeMarker = kMaxUInt32;
 
-  // Set to true when the architecture supports deoptimization exit sequences
-  // of a fixed size, that can be sorted so that the deoptimization index is
-  // deduced from the address of the deoptimization exit.
-  // TODO(jgruber): Remove this, and support for variable deopt exit sizes,
-  // once all architectures use fixed exit sizes.
-  V8_EXPORT_PRIVATE static const bool kSupportsFixedDeoptExitSizes;
-
-  // Size of deoptimization exit sequence. This is only meaningful when
-  // kSupportsFixedDeoptExitSizes is true.
-  V8_EXPORT_PRIVATE static const int kNonLazyDeoptExitSize;
+  // Size of deoptimization exit sequence.
+  V8_EXPORT_PRIVATE static const int kEagerDeoptExitSize;
   V8_EXPORT_PRIVATE static const int kLazyDeoptExitSize;
-  V8_EXPORT_PRIVATE static const int kEagerWithResumeBeforeArgsSize;
-  V8_EXPORT_PRIVATE static const int kEagerWithResumeDeoptExitSize;
-  V8_EXPORT_PRIVATE static const int kEagerWithResumeImmedArgs1PcOffset;
-  V8_EXPORT_PRIVATE static const int kEagerWithResumeImmedArgs2PcOffset;
+
+  // The size of the call instruction to Builtins::kAdaptShadowStackForDeopt.
+  V8_EXPORT_PRIVATE static const int kAdaptShadowStackOffsetToSubtract;
 
   // Tracing.
-  static void TraceMarkForDeoptimization(Code code, const char* reason);
-  static void TraceEvictFromOptimizedCodeCache(SharedFunctionInfo sfi,
+  static void TraceMarkForDeoptimization(Isolate* isolate, Tagged<Code> code,
+                                         LazyDeoptimizeReason reason);
+  static void TraceEvictFromOptimizedCodeCache(Isolate* isolate,
+                                               Tagged<SharedFunctionInfo> sfi,
                                                const char* reason);
 
- private:
-  void QueueValueForMaterialization(Address output_address, Object obj,
-                                    const TranslatedFrame::iterator& iterator);
+  // Patch the generated code to jump to a safepoint entry. This is used only
+  // when Shadow Stack is enabled.
+  static void PatchToJump(Address pc, Address new_pc);
 
-  Deoptimizer(Isolate* isolate, JSFunction function, DeoptimizeKind kind,
-              unsigned deopt_exit_index, Address from, int fp_to_sp_delta);
-  Code FindOptimizedCode();
+ private:
+  void QueueValueForMaterialization(Address output_address, Tagged<Object> obj,
+                                    const TranslatedFrame::iterator& iterator);
+  void QueueFeedbackVectorForMaterialization(
+      Address output_address, const TranslatedFrame::iterator& iterator);
+
+  Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
+              DeoptimizeKind kind, Address from, int fp_to_sp_delta);
   void DeleteFrameDescriptions();
 
   void DoComputeOutputFrames();
+
+#if V8_ENABLE_WEBASSEMBLY
+  void DoComputeOutputFramesWasmImpl();
+  FrameDescription* DoComputeWasmLiftoffFrame(
+      TranslatedFrame& frame, wasm::NativeModule* native_module,
+      Tagged<WasmTrustedInstanceData> wasm_trusted_instance, int frame_index,
+      std::stack<intptr_t>& shadow_stack);
+
+  void GetWasmStackSlotsCounts(const wasm::FunctionSig* sig,
+                               int* parameter_stack_slots,
+                               int* return_stack_slots);
+#endif
+
   void DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
                                  int frame_index, bool goto_catch_handler);
-  void DoComputeArgumentsAdaptorFrame(TranslatedFrame* translated_frame,
+  void DoComputeInlinedExtraArguments(TranslatedFrame* translated_frame,
                                       int frame_index);
-  void DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
-                                   int frame_index);
+  void DoComputeConstructCreateStubFrame(TranslatedFrame* translated_frame,
+                                         int frame_index);
+  void DoComputeConstructInvokeStubFrame(TranslatedFrame* translated_frame,
+                                         int frame_index);
 
-  static Builtins::Name TrampolineForBuiltinContinuation(
-      BuiltinContinuationMode mode, bool must_handle_result);
+  static Builtin TrampolineForBuiltinContinuation(BuiltinContinuationMode mode,
+                                                  bool must_handle_result);
 
+#if V8_ENABLE_WEBASSEMBLY
   TranslatedValue TranslatedValueForWasmReturnKind(
-      base::Optional<wasm::ValueKind> wasm_call_return_kind);
+      std::optional<wasm::ValueKind> wasm_call_return_kind);
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   void DoComputeBuiltinContinuation(TranslatedFrame* translated_frame,
                                     int frame_index,
@@ -174,42 +226,42 @@ class Deoptimizer : public Malloced {
   unsigned ComputeInputFrameAboveFpFixedSize() const;
   unsigned ComputeInputFrameSize() const;
 
-  static unsigned ComputeIncomingArgumentSize(SharedFunctionInfo shared);
-
-  static void MarkAllCodeForContext(NativeContext native_context);
-  static void DeoptimizeMarkedCodeForContext(NativeContext native_context);
-  // Searches the list of known deoptimizing code for a Code object
-  // containing the given address (which is supposedly faster than
-  // searching all code objects).
-  Code FindDeoptimizingCode(Address addr);
+  static unsigned ComputeIncomingArgumentSize(Tagged<Code> code);
 
   // Tracing.
-  bool tracing_enabled() const { return static_cast<bool>(trace_scope_); }
+  bool tracing_enabled() const { return trace_scope_ != nullptr; }
   bool verbose_tracing_enabled() const {
-    return FLAG_trace_deopt_verbose && trace_scope_;
+    return v8_flags.trace_deopt_verbose && tracing_enabled();
   }
-  CodeTracer::Scope* trace_scope() const { return trace_scope_.get(); }
+  CodeTracer::Scope* trace_scope() const { return trace_scope_; }
   CodeTracer::Scope* verbose_trace_scope() const {
-    return FLAG_trace_deopt_verbose ? trace_scope() : nullptr;
+    return v8_flags.trace_deopt_verbose ? trace_scope() : nullptr;
   }
   void TraceDeoptBegin(int optimization_id, BytecodeOffset bytecode_offset);
   void TraceDeoptEnd(double deopt_duration);
 #ifdef DEBUG
-  static void TraceFoundActivation(Isolate* isolate, JSFunction function);
+  static void TraceFoundActivation(Isolate* isolate,
+                                   Tagged<JSFunction> function);
 #endif
   static void TraceDeoptAll(Isolate* isolate);
-  static void TraceDeoptMarked(Isolate* isolate);
+
+  bool is_restart_frame() const { return restart_frame_index_ >= 0; }
 
   Isolate* isolate_;
-  JSFunction function_;
-  Code compiled_code_;
+  Tagged<JSFunction> function_;
+  Tagged<Code> compiled_code_;
+#if V8_ENABLE_WEBASSEMBLY
+  wasm::WasmCode* compiled_optimized_wasm_code_ = nullptr;
+#endif
   unsigned deopt_exit_index_;
+  BytecodeOffset bytecode_offset_in_outermost_frame_ = BytecodeOffset::None();
   DeoptimizeKind deopt_kind_;
   Address from_;
   int fp_to_sp_delta_;
   bool deoptimizing_throw_;
   int catch_handler_data_;
   int catch_handler_pc_offset_;
+  int restart_frame_index_;
 
   // Input frame description.
   FrameDescription* input_;
@@ -236,12 +288,33 @@ class Deoptimizer : public Malloced {
     TranslatedFrame::iterator value_;
   };
   std::vector<ValueToMaterialize> values_to_materialize_;
+  std::vector<ValueToMaterialize> feedback_vector_to_materialize_;
+
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+  intptr_t* shadow_stack_ = nullptr;
+  size_t shadow_stack_count_ = 0;
+#endif  // V8_ENABLE_CET_SHADOW_STACK
 
 #ifdef DEBUG
   DisallowGarbageCollection* disallow_garbage_collection_;
 #endif  // DEBUG
 
-  std::unique_ptr<CodeTracer::Scope> trace_scope_;
+  // Note: This is intentionally not a unique_ptr s.t. the Deoptimizer
+  // satisfies is_standard_layout, needed for offsetof().
+  CodeTracer::Scope* const trace_scope_;
+
+#if V8_ENABLE_WEBASSEMBLY && V8_TARGET_ARCH_32_BIT
+  // Needed by webassembly for lowering signatures containing i64 types. Stored
+  // as members for reuse for multiple signatures during one de-optimization.
+  std::optional<AccountingAllocator> alloc_;
+  std::optional<Zone> zone_;
+#endif
+#if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_SANDBOX
+  // Wasm deoptimizations should not access the heap at all. All deopt data is
+  // stored off-heap.
+  std::optional<SandboxHardwareSupport::BlockAccessScope>
+      no_heap_access_during_wasm_deopt_;
+#endif
 
   friend class DeoptimizedFrameInfo;
   friend class FrameDescription;

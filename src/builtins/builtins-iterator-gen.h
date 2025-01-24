@@ -6,6 +6,7 @@
 #define V8_BUILTINS_BUILTINS_ITERATOR_GEN_H_
 
 #include "src/codegen/code-stub-assembler.h"
+#include "src/objects/contexts.h"
 
 namespace v8 {
 namespace internal {
@@ -35,11 +36,23 @@ class IteratorBuiltinsAssembler : public CodeStubAssembler {
   // object, loaded from the native context.
   TNode<JSReceiver> IteratorStep(
       TNode<Context> context, const IteratorRecord& iterator, Label* if_done,
-      base::Optional<TNode<Map>> fast_iterator_result_map = base::nullopt);
+      std::optional<TNode<Map>> fast_iterator_result_map = std::nullopt);
   TNode<JSReceiver> IteratorStep(
       TNode<Context> context, const IteratorRecord& iterator,
-      base::Optional<TNode<Map>> fast_iterator_result_map, Label* if_done) {
+      std::optional<TNode<Map>> fast_iterator_result_map, Label* if_done) {
     return IteratorStep(context, iterator, if_done, fast_iterator_result_map);
+  }
+
+  // https://tc39.es/ecma262/#sec-iteratorcomplete
+  void IteratorComplete(
+      TNode<Context> context, const TNode<HeapObject> iterator, Label* if_done,
+      std::optional<TNode<Map>> fast_iterator_result_map = std::nullopt);
+  void IteratorComplete(TNode<Context> context,
+                        const TNode<HeapObject> iterator,
+                        std::optional<TNode<Map>> fast_iterator_result_map,
+                        Label* if_done) {
+    return IteratorComplete(context, iterator, if_done,
+                            fast_iterator_result_map);
   }
 
   // https://tc39.github.io/ecma262/#sec-iteratorvalue
@@ -48,7 +61,17 @@ class IteratorBuiltinsAssembler : public CodeStubAssembler {
   // object, loaded from the native context.
   TNode<Object> IteratorValue(
       TNode<Context> context, TNode<JSReceiver> result,
-      base::Optional<TNode<Map>> fast_iterator_result_map = base::nullopt);
+      std::optional<TNode<Map>> fast_iterator_result_map = std::nullopt);
+
+  void Iterate(TNode<Context> context, TNode<Object> iterable,
+               std::function<void(TNode<Object>)> func,
+               std::initializer_list<compiler::CodeAssemblerVariable*>
+                   merged_variables = {});
+  void Iterate(TNode<Context> context, TNode<Object> iterable,
+               TNode<Object> iterable_fn,
+               std::function<void(TNode<Object>)> func,
+               std::initializer_list<compiler::CodeAssemblerVariable*>
+                   merged_variables = {});
 
   // #sec-iterabletolist
   // Build a JSArray by iterating over {iterable} using {iterator_fn},
@@ -67,8 +90,8 @@ class IteratorBuiltinsAssembler : public CodeStubAssembler {
 
   // Currently at https://tc39.github.io/proposal-intl-list-format/
   // #sec-createstringlistfromiterable
-  TNode<JSArray> StringListFromIterable(TNode<Context> context,
-                                        TNode<Object> iterable);
+  TNode<FixedArray> StringListFromIterable(TNode<Context> context,
+                                           TNode<Object> iterable);
 
   void FastIterableToList(TNode<Context> context, TNode<Object> iterable,
                           TVariable<JSArray>* var_result, Label* slow);

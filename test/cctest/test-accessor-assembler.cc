@@ -2,18 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "test/cctest/cctest.h"
-
 #include "src/base/utils/random-number-generator.h"
 #include "src/ic/accessor-assembler.h"
 #include "src/ic/stub-cache.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
-#include "test/cctest/compiler/code-assembler-tester.h"
+#include "test/cctest/cctest.h"
 #include "test/cctest/compiler/function-tester.h"
+#include "test/common/code-assembler-tester.h"
 
 namespace v8 {
 namespace internal {
+
+#include "src/codegen/define-code-stub-assembler-macros.inc"
 
 using compiler::CodeAssemblerTester;
 using compiler::FunctionTester;
@@ -24,7 +25,7 @@ namespace {
 void TestStubCacheOffsetCalculation(StubCache::Table table) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   const int kNumParams = 2;
-  CodeAssemblerTester data(isolate, kNumParams + 1);  // Include receiver.
+  CodeAssemblerTester data(isolate, JSParameterCount(kNumParams));
   AccessorAssembler m(data.state());
 
   {
@@ -37,12 +38,12 @@ void TestStubCacheOffsetCalculation(StubCache::Table table) {
       result = primary_offset;
     } else {
       CHECK_EQ(StubCache::kSecondary, table);
-      result = m.StubCacheSecondaryOffsetForTesting(name, primary_offset);
+      result = m.StubCacheSecondaryOffsetForTesting(name, map);
     }
     m.Return(m.SmiTag(result));
   }
 
-  Handle<Code> code = data.GenerateCode();
+  DirectHandle<Code> code = data.GenerateCode();
   FunctionTester ft(code, kNumParams);
 
   Factory* factory = isolate->factory();
@@ -60,16 +61,11 @@ void TestStubCacheOffsetCalculation(StubCache::Table table) {
   };
 
   Handle<Map> maps[] = {
-      factory->cell_map(),
-      Map::Create(isolate, 0),
-      factory->meta_map(),
-      factory->code_map(),
-      Map::Create(isolate, 0),
-      factory->hash_table_map(),
-      factory->symbol_map(),
-      factory->string_map(),
-      Map::Create(isolate, 0),
-      factory->sloppy_arguments_elements_map(),
+      factory->cell_map(),     Map::Create(isolate, 0),
+      factory->meta_map(),     factory->instruction_stream_map(),
+      Map::Create(isolate, 0), factory->hash_table_map(),
+      factory->symbol_map(),   factory->seq_two_byte_string_map(),
+      Map::Create(isolate, 0), factory->sloppy_arguments_elements_map(),
   };
 
   for (size_t name_index = 0; name_index < arraysize(names); name_index++) {
@@ -83,14 +79,13 @@ void TestStubCacheOffsetCalculation(StubCache::Table table) {
         if (table == StubCache::kPrimary) {
           expected_result = primary_offset;
         } else {
-          expected_result =
-              StubCache::SecondaryOffsetForTesting(*name, primary_offset);
+          expected_result = StubCache::SecondaryOffsetForTesting(*name, *map);
         }
       }
-      Handle<Object> result = ft.Call(name, map).ToHandleChecked();
+      DirectHandle<Object> result = ft.Call(name, map).ToHandleChecked();
 
-      Smi expected = Smi::FromInt(expected_result & Smi::kMaxValue);
-      CHECK_EQ(expected, Smi::cast(*result));
+      Tagged<Smi> expected = Smi::FromInt(expected_result & Smi::kMaxValue);
+      CHECK_EQ(expected, Cast<Smi>(*result));
     }
   }
 }
@@ -121,7 +116,7 @@ TEST(TryProbeStubCache) {
   using Label = CodeStubAssembler::Label;
   Isolate* isolate(CcTest::InitIsolateOnce());
   const int kNumParams = 3;
-  CodeAssemblerTester data(isolate, kNumParams + 1);  // Include receiver.
+  CodeAssemblerTester data(isolate, JSParameterCount(kNumParams));
   AccessorAssembler m(data.state());
 
   StubCache stub_cache(isolate);
@@ -154,14 +149,14 @@ TEST(TryProbeStubCache) {
     m.Return(m.BooleanConstant(false));
   }
 
-  Handle<Code> code = data.GenerateCode();
+  DirectHandle<Code> code = data.GenerateCode();
   FunctionTester ft(code, kNumParams);
 
   std::vector<Handle<Name>> names;
   std::vector<Handle<JSObject>> receivers;
   std::vector<Handle<Code>> handlers;
 
-  base::RandomNumberGenerator rand_gen(FLAG_random_seed);
+  base::RandomNumberGenerator rand_gen(v8_flags.random_seed);
 
   Factory* factory = isolate->factory();
 
@@ -197,7 +192,7 @@ TEST(TryProbeStubCache) {
 
   // Generate some number of receiver maps and receivers.
   for (int i = 0; i < StubCache::kSecondaryTableSize / 2; i++) {
-    Handle<Map> map = Map::Create(isolate, 0);
+    DirectHandle<Map> map = Map::Create(isolate, 0);
     receivers.push_back(factory->NewJSObjectFromMap(map));
   }
 
@@ -214,10 +209,10 @@ TEST(TryProbeStubCache) {
   const int N = StubCache::kPrimaryTableSize + StubCache::kSecondaryTableSize;
   for (int i = 0; i < N; i++) {
     int index = rand_gen.NextInt();
-    Handle<Name> name = names[index % names.size()];
-    Handle<JSObject> receiver = receivers[index % receivers.size()];
-    Handle<Code> handler = handlers[index % handlers.size()];
-    stub_cache.Set(*name, receiver->map(), MaybeObject::FromObject(*handler));
+    DirectHandle<Name> name = names[index % names.size()];
+    DirectHandle<JSObject> receiver = receivers[index % receivers.size()];
+    DirectHandle<Code> handler = handlers[index % handlers.size()];
+    stub_cache.Set(*name, receiver->map(), *handler);
   }
 
   // Perform some queries.
@@ -227,14 +222,14 @@ TEST(TryProbeStubCache) {
     int index = rand_gen.NextInt();
     Handle<Name> name = names[index % names.size()];
     Handle<JSObject> receiver = receivers[index % receivers.size()];
-    MaybeObject handler = stub_cache.Get(*name, receiver->map());
+    Tagged<MaybeObject> handler = stub_cache.Get(*name, receiver->map());
     if (handler.ptr() == kNullAddress) {
       queried_non_existing = true;
     } else {
       queried_existing = true;
     }
 
-    Handle<Object> expected_handler(handler->GetHeapObjectOrSmi(), isolate);
+    Handle<Object> expected_handler(handler.GetHeapObjectOrSmi(), isolate);
     ft.CheckTrue(receiver, name, expected_handler);
   }
 
@@ -243,19 +238,21 @@ TEST(TryProbeStubCache) {
     int index2 = rand_gen.NextInt();
     Handle<Name> name = names[index1 % names.size()];
     Handle<JSObject> receiver = receivers[index2 % receivers.size()];
-    MaybeObject handler = stub_cache.Get(*name, receiver->map());
+    Tagged<MaybeObject> handler = stub_cache.Get(*name, receiver->map());
     if (handler.ptr() == kNullAddress) {
       queried_non_existing = true;
     } else {
       queried_existing = true;
     }
 
-    Handle<Object> expected_handler(handler->GetHeapObjectOrSmi(), isolate);
+    Handle<Object> expected_handler(handler.GetHeapObjectOrSmi(), isolate);
     ft.CheckTrue(receiver, name, expected_handler);
   }
   // Ensure we performed both kind of queries.
   CHECK(queried_existing && queried_non_existing);
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

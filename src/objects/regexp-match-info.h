@@ -8,7 +8,6 @@
 #include "src/base/compiler-specific.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/objects.h"
-#include "torque-generated/field-offsets.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -19,58 +18,76 @@ namespace internal {
 class Object;
 class String;
 
+// TODO(jgruber): These should no longer be included here; instead, all
+// TorqueGeneratedFooAsserts should be emitted into a global .cc file.
 #include "torque-generated/src/objects/regexp-match-info-tq.inc"
 
-// The property RegExpMatchInfo includes the matchIndices
-// array of the last successful regexp match (an array of start/end index
-// pairs for the match and all the captured substrings), the invariant is
-// that there are at least two capture indices.  The array also contains
-// the subject string for the last successful match.
-// After creation the result must be treated as a FixedArray in all regards.
-class V8_EXPORT_PRIVATE RegExpMatchInfo : NON_EXPORTED_BASE(public FixedArray) {
+class RegExpMatchInfoShape final : public AllStatic {
  public:
-  // Returns the number of captures, which is defined as the length of the
-  // matchIndices objects of the last match. matchIndices contains two indices
-  // for each capture (including the match itself), i.e. 2 * #captures + 2.
-  inline int NumberOfCaptureRegisters();
-  inline void SetNumberOfCaptureRegisters(int value);
+  using ElementT = Smi;
+  using CompressionScheme = SmiCompressionScheme;
+  static constexpr RootIndex kMapRootIndex = RootIndex::kRegExpMatchInfoMap;
+  static constexpr bool kLengthEqualsCapacity = true;
 
-  // Returns the subject string of the last match.
-  inline String LastSubject();
-  inline void SetLastSubject(String value);
+  V8_ARRAY_EXTRA_FIELDS({
+    TaggedMember<Smi> number_of_capture_registers_;
+    TaggedMember<String> last_subject_;
+    TaggedMember<Object> last_input_;
+  });
+};
 
-  // Like LastSubject, but modifiable by the user.
-  inline Object LastInput();
-  inline void SetLastInput(Object value);
+// The property RegExpMatchInfo includes the matchIndices array of the last
+// successful regexp match (an array of start/end index pairs for the match and
+// all the captured substrings), the invariant is that there are at least two
+// capture indices.  The array also contains the subject string for the last
+// successful match.
+V8_OBJECT class RegExpMatchInfo
+    : public TaggedArrayBase<RegExpMatchInfo, RegExpMatchInfoShape> {
+  using Super = TaggedArrayBase<RegExpMatchInfo, RegExpMatchInfoShape>;
 
-  // Returns the i'th capture index, 0 <= i < NumberOfCaptures(). Capture(0) and
-  // Capture(1) determine the start- and endpoint of the match itself.
-  inline int Capture(int i);
-  inline void SetCapture(int i, int value);
+ public:
+  using Shape = RegExpMatchInfoShape;
 
-  // Creates a new RegExpMatchInfo with space for capture_count captures.
-  static Handle<RegExpMatchInfo> New(Isolate* isolate, int capture_count);
+  V8_EXPORT_PRIVATE static Handle<RegExpMatchInfo> New(
+      Isolate* isolate, int capture_count,
+      AllocationType allocation = AllocationType::kYoung);
 
-  // Reserves space for captures.
   static Handle<RegExpMatchInfo> ReserveCaptures(
       Isolate* isolate, Handle<RegExpMatchInfo> match_info, int capture_count);
 
-  DECL_CAST(RegExpMatchInfo)
+  // Returns the number of captures, which is defined as the length of the
+  // matchIndices objects of the last match. matchIndices contains two indices
+  // for each capture (including the match itself), i.e. 2 * #captures + 2.
+  inline int number_of_capture_registers() const;
+  inline void set_number_of_capture_registers(int value);
 
-  static const int kNumberOfCapturesIndex = 0;
-  static const int kLastSubjectIndex = 1;
-  static const int kLastInputIndex = 2;
-  static const int kFirstCaptureIndex = 3;
-  static const int kLastMatchOverhead = kFirstCaptureIndex;
+  // Returns the subject string of the last match.
+  inline Tagged<String> last_subject() const;
+  inline void set_last_subject(Tagged<String> value,
+                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  DEFINE_FIELD_OFFSET_CONSTANTS(FixedArray::kHeaderSize,
-                                TORQUE_GENERATED_REG_EXP_MATCH_INFO_FIELDS)
+  // Like |last_subject|, but modifiable by the user.
+  inline Tagged<Object> last_input() const;
+  inline void set_last_input(Tagged<Object> value,
+                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  // Every match info is guaranteed to have enough space to store two captures.
-  static const int kInitialCaptureIndices = 2;
+  inline int capture(int index) const;
+  inline void set_capture(int index, int value);
 
-  OBJECT_CONSTRUCTORS(RegExpMatchInfo, FixedArray);
-};
+  static constexpr int capture_start_index(int capture_index) {
+    return capture_index * 2;
+  }
+  static constexpr int capture_end_index(int capture_index) {
+    return capture_index * 2 + 1;
+  }
+
+  static constexpr int kMinCapacity = 2;
+
+  DECL_PRINTER(RegExpMatchInfo)
+  DECL_VERIFIER(RegExpMatchInfo)
+
+  class BodyDescriptor;
+} V8_OBJECT_END;
 
 }  // namespace internal
 }  // namespace v8

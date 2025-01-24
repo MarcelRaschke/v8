@@ -5,9 +5,8 @@
 #ifndef V8_OBJECTS_HEAP_NUMBER_INL_H_
 #define V8_OBJECTS_HEAP_NUMBER_INL_H_
 
+#include "src/base/memory.h"
 #include "src/objects/heap-number.h"
-
-#include "src/objects/objects-inl.h"
 #include "src/objects/primitive-heap-object-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -16,26 +15,23 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/heap-number-tq-inl.inc"
-
-TQ_OBJECT_CONSTRUCTORS_IMPL(HeapNumber)
-
-uint64_t HeapNumber::value_as_bits() const {
-  // Bug(v8:8875): HeapNumber's double may be unaligned.
-  return base::ReadUnalignedValue<uint64_t>(field_address(kValueOffset));
+double HeapNumber::value() const { return value_.value(); }
+void HeapNumber::set_value(double value) {
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  // TODO(nicohartmann): Turn into DCHECK.
+  CHECK(!IsUndefinedNan(value));
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  value_.set_value(value);
 }
+
+uint64_t HeapNumber::value_as_bits() const { return value_.value_as_bits(); }
 
 void HeapNumber::set_value_as_bits(uint64_t bits) {
-  base::WriteUnalignedValue<uint64_t>(field_address(kValueOffset), bits);
-}
-
-int HeapNumber::get_exponent() {
-  return ((ReadField<int>(kExponentOffset) & kExponentMask) >> kExponentShift) -
-         kExponentBias;
-}
-
-int HeapNumber::get_sign() {
-  return ReadField<int>(kExponentOffset) & kSignMask;
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  // TODO(nicohartmann): Turn into DCHECK.
+  CHECK_NE(bits, kUndefinedNanInt64);
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  value_.set_value_as_bits(bits);
 }
 
 }  // namespace internal

@@ -8,6 +8,9 @@
   # https://crbug.com/v8/7932
   'runtime/command-line-api-without-side-effects': [SKIP],
 
+  # https://crbug.com/v8/13851
+  'debugger/pause-on-oom': [SKIP],
+
   # Require optimization, so can't be run on Lite mode.
   'cpu-profiler/coverage-block': [PASS, ['lite_mode == True', SKIP]],
   'cpu-profiler/coverage': [PASS, ['lite_mode == True', SKIP]],
@@ -15,27 +18,22 @@
   # https://crbug.com/v8/9029
   'debugger/script-on-after-compile-snapshot': [SKIP],
 
-  # https://crbug.com/v8/10356
-  # This test worked in the wasm interpreter, but fails when using Liftoff for
-  # debugging.
-  'debugger/wasm-externref-global': [FAIL],
-
   # https://crbug.com/1080638
   # The initial CL only fixed the crash. The test still causes an endless
   # loop instead of properly reporting a RangeError for a stack overflow.
   'regress/regress-crbug-1080638': [SKIP],
 
-  # https://crbug.com/v8/11338
-  'runtime-call-stats/enable-disable': [PASS, ['verify_csa', SKIP]],
+  # Tests that need to run sequentially (e.g. due to memory consumption).
+  'runtime/console-messages-limits': [PASS, SLOW, HEAVY],
+  'runtime/regression-732717': [PASS, HEAVY],
 }],  # ALWAYS
 
 ##############################################################################
-['mode != debug or dcheck_always_on', {
-  # Investigating flaky tests: https://crbug.com/v8/10876. Enable only on pure debug.
-  'debugger/pause-on-oom': [SKIP],
-  'debugger/pause-on-oom-wide': [SKIP],
-  'debugger/pause-on-oom-extrawide': [SKIP],
-}],  # 'mode != debug or dcheck_always_on'
+['arch == x64 and mode == debug', {
+  # Flaky tests: https://crbug.com/v8/10876
+  'debugger/pause-on-oom-extrawide': [PASS, FAIL],
+  'debugger/pause-on-oom-wide': [PASS, FAIL],
+}],  # 'arch == x64 and mode == debug'
 
 ##############################################################################
 ['system == android', {
@@ -63,23 +61,15 @@
   'debugger/wasm-*': [SKIP],
   'cpu-profiler/console-profile-wasm': [SKIP],
   'runtime/get-properties': [SKIP],
+  'regress/regress-crbug-349248170': [SKIP],
 }],  # not has_webassembly or variant == jitless
-
-##############################################################################
-['lite_mode or variant == jitless', {
-  # Lite mode does not allocate feedback vector.
-  'type-profiler/type-profile-start-stop': [SKIP],
-  'type-profiler/type-profile': [SKIP],
-  'type-profiler/type-profile-with-to-string-tag': [SKIP],
-  'type-profiler/type-profile-with-classes': [SKIP],
-  'type-profiler/type-profile-disable': [SKIP],
-}],  # 'lite_mode or variant == jitless'
 
 ##############################################################################
 ['variant == jitless', {
   # https://crbug.com/v8/7777
   'cpu-profiler/coverage': [SKIP],
   'cpu-profiler/coverage-block': [SKIP],
+  'regress/regress-crbug-1233401': [SKIP],
 }], # variant == jitless
 
 ##############################################################################
@@ -90,8 +80,7 @@
 
 ##############################################################################
 ['(arch == ppc64) and simulator_run', {
-  # Slow test: https://crbug.com/v8/10965
-  'runtime/console-messages-limits': [PASS, SLOW],
+  # Slow tests:
   'debugger/regress-1125934': [PASS, SLOW],
 }],  # (arch == ppc64) and simulator_run
 
@@ -101,30 +90,58 @@
 }],  # variant == no_wasm_traps
 
 ##############################################################################
-['arch == ppc or arch == ppc64', {
-  # Liftoff needs to be enabled before running these tests.
-  'debugger/wasm-*': [SKIP],
-}],  # 'arch == ppc or arch == ppc64'
+['arch == s390x or arch == ppc64', {
+  # Need to fix loading of DebugBreak registers
+  'debugger/wasm-inspect-many-registers': [SKIP],
+  # endian related issue
+  'debugger/wasm-scope-info': [SKIP],
+  'debugger/wasm-conditional-breakpoints': [SKIP],
+  'debugger/wasm-evaluate-on-call-frame': [SKIP],
+  'debugger/wasm-set-breakpoint': [SKIP],
+  'debugger/wasm-stack-check': [SKIP],
+  'debugger/wasm-step-after-trap': [SKIP],
+  'debugger/wasm-stepping-no-opcode-merging': [SKIP],
+  'debugger/wasm-stepping-with-source-map': [SKIP],
+  # Generic wasm-to-js wrapper must be enabled.
+  'cpu-profiler/console-profile-wasm': [SKIP],
+}],  # 'arch == s390x or arch == ppc64'
 
 ##############################################################################
-['arch == s390 or arch == s390x', {
-  # Stack manipulations in LiveEdit is not implemented for this arch.
-  'debugger/set-script-source-stack-padding': [SKIP],
-  # Liftoff needs to be enabled before running these tests.
-  'debugger/wasm-*': [SKIP],
-}],  # 'arch == s390 or arch == s390x'
+['system == zos', {
+  # Currently no cpu profiler support on z/OS:
+  'cpu-profiler/console-profile-wasm': [SKIP],
+  'cpu-profiler/record-cpu-profile': [SKIP],
+  'cpu-profiler/console-profile-asm-js': [SKIP],
+}],  # 'system == zos'
 
 ##############################################################################
-['(arch == mipsel or arch == mips64el) and not simd_mips', {
-  # Skip tests that fail on MIPS architectures that don't support SIMD.
-  'debugger/wasm-scope-info*': [SKIP],
-}],  # '(arch == mipsel or arch == mips64el) and not simd_mips'
+['no_simd_hardware', {
+  # Test contains SIMD value.
+  'debugger/wasm-scope-info': [SKIP],
+}], # no_simd_hardware
 
 ##############################################################################
-['arch == riscv64', {
+['arch == loong64', {
   # SIMD support is still in progress.
   'debugger/wasm-scope-info*': [SKIP],
-}],  # 'arch == riscv64'
+  'debugger/wasm-step-after-trap': [SKIP],
+}],  # 'arch == loong64'
+
+##############################################################################
+['arch == riscv64 or arch == riscv32', {
+  # SIMD support is still in progress.
+  'debugger/wasm-scope-info*': [SKIP],
+  'debugger/wasm-step-after-trap': [SKIP],
+}],  # 'arch == riscv64 or arch == riscv32'
+
+##############################################################################
+['arch == riscv32', {
+# Skip case on riscv32
+'debugger/wasm-inspect-many-registers':[SKIP],
+
+'debugger/wasm-gc-breakpoints':['variant == stress_incremental_marking', SKIP],
+}],  # 'arch == riscv32'
+
 
 ################################################################################
 ['variant == stress_snapshot', {
@@ -144,6 +161,9 @@
   # This test is just slow on TSan, and TSan coverage is not needed to test
   # that we do not run OOM. Thus skip it on TSan.
   'debugger/wasm-step-a-lot': [SKIP],
+
+  # Another slow test that does not need to run on TSan.
+  'debugger/wasm-inspect-many-registers': [SKIP],
 }],  # 'tsan == True'
 
 ##############################################################################
@@ -153,7 +173,7 @@
   'cpu-profiler/coverage-block': [SKIP],
   'debugger/get-possible-breakpoints': [SKIP],
   'debugger/get-possible-breakpoints-array-literal': [SKIP],
-  'debugger/get-possible-breakpoints-master': [SKIP],
+  'debugger/get-possible-breakpoints-main': [SKIP],
   'debugger/limit-size-of-collected-scripts': [SKIP],
   'debugger/not-hold-promises': [SKIP],
   'debugger/regression-424142': [SKIP],
@@ -162,11 +182,9 @@
   'debugger/set-breakpoint-at-last-line': [SKIP],
   'debugger/set-breakpoint-breaks-on-first-breakable-location': [SKIP],
   'heap-profiler/collect-garbage' : [SKIP],
-  'runtime-call-stats/collection': [SKIP],
   'runtime/context-destroyed-on-context-collected': [SKIP],
   'runtime/evaluate-async': [SKIP],
   'runtime/internal-properties-entries': [SKIP],
-  'type-profiler/type-profile-start-stop': [SKIP],
 }], # gc_stress
 
 ##############################################################################
@@ -185,10 +203,16 @@
   'cpu-profiler/coverage': [SKIP],
   'cpu-profiler/coverage-block': [SKIP],
   'runtime/internal-properties-entries': [SKIP],
-  'runtime-call-stats/collection': [SKIP],
+
+  # TODO(v8:12590): the test became too slow with external code space enabled.
+  # Skip it for now.
+  'debugger/wasm-step-a-lot': [SKIP],
 
   # Skip tests that might fail with concurrent allocation
   'debugger/pause-on-oom-wide': [SKIP],
+
+  # TODO(v8:12612): This test may fail on builds with MinorMS because incremental marking prevents getting any minor GCs.
+  'heap-profiler/sampling-heap-profiler-flags': [PASS, ['mode == debug or tsan', SKIP]],
 }], # stress_concurrent_allocation
 
 ##############################################################################
@@ -197,5 +221,45 @@
   # (https://crbug.com/v8/11107).
   'runtime/evaluate-async': [SKIP],
 }], # asan == True
+
+##############################################################################
+['full_debug', {
+  # Tests too slow in non-optimized debug mode.
+  'runtime/console-messages-limits': [SKIP],
+}],  # 'full_debug'
+
+##############################################################################
+['tsan and not concurrent_marking', {
+  'cpu-profiler/coverage-block': [SKIP],
+}],  # tsan and not concurrent_marking
+
+##############################################################################
+['not i18n', {
+  'runtime/evaluate-without-side-effects-i18n': [SKIP],
+}],  # not i18n
+
+##############################################################################
+['lite_mode or variant in (nooptimization, jitless, assert_types)', {
+  # Test relies on TurboFan being enabled.
+  'debugger/restart-frame/restart-inlined-frame': [SKIP],
+  'debugger/value-unavailable-scopes': [SKIP],
+}], # lite_mode or variant in (nooptimization, jitless, assert_types)
+
+##############################################################################
+['single_generation', {
+  'heap-profiler/sampling-heap-profiler-flags': [SKIP],
+}], # single_generation
+
+##############################################################################
+['clang_coverage and mode == debug', {
+  # Too slow tests.
+  'runtime/console-messages-limits': [SKIP],
+}],  # 'clang_coverage and mode == debug'
+
+##############################################################################
+['((arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != ppc64) or (simulator_run and conservative_stack_scanning))', {
+  # Stack switching is only supported on x64/arm64/ia32/arm.
+  'debugger/wasm-jspi-async-stack': [SKIP],
+}],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm)
 
 ]

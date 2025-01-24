@@ -12,6 +12,38 @@
 namespace v8 {
 namespace base {
 
+// Defines the page initialization mode of a BoundedPageAllocator.
+enum class PageInitializationMode {
+  // The contents of allocated pages must be zero initialized. This causes any
+  // committed pages to be decommitted during FreePages and ReleasePages.
+  kAllocatedPagesMustBeZeroInitialized,
+  // Allocated pages do not have to be be zero initialized and can contain old
+  // data. This is slightly faster as comitted pages are not decommitted
+  // during FreePages and ReleasePages, but only made inaccessible.
+  kAllocatedPagesCanBeUninitialized,
+  // Assume pages are in discarded state and already have the right page
+  // permissions. Using this mode requires PageFreeingMode::kDiscard.
+  kRecommitOnly,
+};
+
+// Defines how BoundedPageAllocator frees pages when FreePages or ReleasePages
+// is requested.
+enum class PageFreeingMode {
+  // Pages are freed/released by setting permissions to kNoAccess. This is the
+  // preferred mode when current platform/configuration allows any page
+  // permissions reconfiguration.
+  kMakeInaccessible,
+
+  // Pages are freed/released by using DiscardSystemPages of the underlying
+  // page allocator. This mode should be used for the cases when page permission
+  // reconfiguration is not allowed. In particular, on MacOS on ARM64 ("Apple
+  // M1"/Apple Silicon) it's not allowed to reconfigure RWX pages to anything
+  // else.
+  // This mode is not compatible with kAllocatedPagesMustBeZeroInitialized
+  // page initialization mode.
+  kDiscard,
+};
+
 // This is a v8::PageAllocator implementation that allocates pages within the
 // pre-reserved region of virtual space. This class requires the virtual space
 // to be kept reserved during the lifetime of this object.
@@ -25,10 +57,21 @@ namespace base {
 // The implementation is thread-safe.
 class V8_BASE_EXPORT BoundedPageAllocator : public v8::PageAllocator {
  public:
+  enum class AllocationStatus {
+    kSuccess,
+    kFailedToCommit,
+    kRanOutOfReservation,
+    kHintedAddressTakenOrNotFound,
+  };
+
   using Address = uintptr_t;
 
+  static const char* AllocationStatusToString(AllocationStatus);
+
   BoundedPageAllocator(v8::PageAllocator* page_allocator, Address start,
-                       size_t size, size_t allocate_page_size);
+                       size_t size, size_t allocate_page_size,
+                       PageInitializationMode page_initialization_mode,
+                       PageFreeingMode page_freeing_mode);
   BoundedPageAllocator(const BoundedPageAllocator&) = delete;
   BoundedPageAllocator& operator=(const BoundedPageAllocator&) = delete;
   ~BoundedPageAllocator() override = default;
@@ -69,14 +112,28 @@ class V8_BASE_EXPORT BoundedPageAllocator : public v8::PageAllocator {
 
   bool SetPermissions(void* address, size_t size, Permission access) override;
 
+  bool RecommitPages(void* address, size_t size,
+                     PageAllocator::Permission access) override;
+
   bool DiscardSystemPages(void* address, size_t size) override;
 
+  bool DecommitPages(void* address, size_t size) override;
+
+  bool SealPages(void* address, size_t size) override;
+
+  AllocationStatus get_last_allocation_status() const {
+    return allocation_status_;
+  }
+
  private:
-  v8::base::Mutex mutex_;
+  v8::base::SpinningMutex mutex_;
   const size_t allocate_page_size_;
   const size_t commit_page_size_;
   v8::PageAllocator* const page_allocator_;
   v8::base::RegionAllocator region_allocator_;
+  const PageInitializationMode page_initialization_mode_;
+  const PageFreeingMode page_freeing_mode_;
+  AllocationStatus allocation_status_ = AllocationStatus::kSuccess;
 };
 
 }  // namespace base

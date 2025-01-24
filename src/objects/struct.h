@@ -14,6 +14,8 @@
 namespace v8 {
 namespace internal {
 
+class StructBodyDescriptor;
+
 #include "torque-generated/src/objects/struct-tq.inc"
 
 // An abstract superclass, a marker class really, for simple structure classes.
@@ -21,9 +23,8 @@ namespace internal {
 // identified in the type system.
 class Struct : public TorqueGeneratedStruct<Struct, HeapObject> {
  public:
-  inline void InitializeBody(int object_size);
   void BriefPrintDetails(std::ostream& os);
-  STATIC_ASSERT(kHeaderSize == HeapObject::kHeaderSize);
+  static_assert(kHeaderSize == HeapObject::kHeaderSize);
 
   TQ_OBJECT_CONSTRUCTORS(Struct)
 };
@@ -31,6 +32,8 @@ class Struct : public TorqueGeneratedStruct<Struct, HeapObject> {
 class Tuple2 : public TorqueGeneratedTuple2<Tuple2, Struct> {
  public:
   void BriefPrintDetails(std::ostream& os);
+
+  using BodyDescriptor = StructBodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(Tuple2)
 };
@@ -44,24 +47,34 @@ class Tuple2 : public TorqueGeneratedTuple2<Tuple2, Struct> {
 class AccessorPair : public TorqueGeneratedAccessorPair<AccessorPair, Struct> {
  public:
   NEVER_READ_ONLY_SPACE
-  static Handle<AccessorPair> Copy(Isolate* isolate, Handle<AccessorPair> pair);
+  static DirectHandle<AccessorPair> Copy(Isolate* isolate,
+                                         DirectHandle<AccessorPair> pair);
 
-  inline Object get(AccessorComponent component);
-  inline void set(AccessorComponent component, Object value);
+  inline Tagged<Object> get(AccessorComponent component);
+  inline void set(AccessorComponent component, Tagged<Object> value);
+  inline void set(AccessorComponent component, Tagged<Object> value,
+                  ReleaseStoreTag tag);
+
+  using TorqueGeneratedAccessorPair::getter;
+  using TorqueGeneratedAccessorPair::set_getter;
+  DECL_RELEASE_ACQUIRE_ACCESSORS(getter, Tagged<Object>)
+
+  using TorqueGeneratedAccessorPair::set_setter;
+  using TorqueGeneratedAccessorPair::setter;
+  DECL_RELEASE_ACQUIRE_ACCESSORS(setter, Tagged<Object>)
 
   // Note: Returns undefined if the component is not set.
-  static Handle<Object> GetComponent(Isolate* isolate,
-                                     Handle<NativeContext> native_context,
-                                     Handle<AccessorPair> accessor_pair,
-                                     AccessorComponent component);
+  static Handle<JSAny> GetComponent(Isolate* isolate,
+                                    DirectHandle<NativeContext> native_context,
+                                    DirectHandle<AccessorPair> accessor_pair,
+                                    AccessorComponent component);
 
   // Set both components, skipping arguments which are a JavaScript null.
-  inline void SetComponents(Object getter, Object setter);
+  inline void SetComponents(Tagged<Object> getter, Tagged<Object> setter);
 
-  inline bool Equals(Object getter_value, Object setter_value);
+  inline bool Equals(Tagged<Object> getter_value, Tagged<Object> setter_value);
 
-  // Dispatched behavior.
-  DECL_PRINTER(AccessorPair)
+  using BodyDescriptor = StructBodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(AccessorPair)
 };
@@ -70,8 +83,9 @@ class ClassPositions
     : public TorqueGeneratedClassPositions<ClassPositions, Struct> {
  public:
   // Dispatched behavior.
-  DECL_PRINTER(ClassPositions)
   void BriefPrintDetails(std::ostream& os);
+
+  using BodyDescriptor = StructBodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(ClassPositions)
 };

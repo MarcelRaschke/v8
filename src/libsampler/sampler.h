@@ -8,8 +8,8 @@
 #include <atomic>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
-#include "include/v8.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/macros.h"
 
@@ -18,6 +18,10 @@
 #endif
 
 namespace v8 {
+
+class Isolate;
+struct RegisterState;
+
 namespace sampler {
 
 // ----------------------------------------------------------------------------
@@ -147,7 +151,7 @@ class V8_EXPORT_PRIVATE SamplerManager {
   // global lazy instance.
   friend class base::LeakyObject<SamplerManager>;
 
-  std::unordered_map<pthread_t, SamplerList> sampler_map_;
+  std::unordered_map<int, SamplerList> sampler_map_;
   AtomicMutex samplers_access_counter_{false};
 };
 

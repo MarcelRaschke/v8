@@ -37,15 +37,12 @@ class EmbeddedFileWriterInterface {
   virtual int GetExternallyCompiledFilenameCount() const = 0;
 
   // The isolate will call the method below just prior to replacing the
-  // compiled builtin Code objects with trampolines.
+  // compiled builtin InstructionStream objects with trampolines.
   virtual void PrepareBuiltinSourcePositionMap(Builtins* builtins) = 0;
-
-  virtual void PrepareBuiltinLabelInfoMap(int create_offset,
-                                          int invoke_offset) = 0;
 
 #if defined(V8_OS_WIN64)
   virtual void SetBuiltinUnwindData(
-      int builtin_index,
+      Builtin builtin,
       const win64_unwindinfo::BuiltinUnwindInfo& unwinding_info) = 0;
 #endif  // V8_OS_WIN64
 };
